@@ -16,7 +16,8 @@ import config as app_config
 from api_helpers import (
     create_openai_error_response,
     openai_fake_stream_generator,
-    StreamingReasoningProcessor
+    StreamingReasoningProcessor,
+    execute_with_retry
 )
 from message_processing import extract_reasoning_by_tags
 from credentials_manager import _refresh_auth
@@ -258,7 +259,10 @@ class OpenAIDirectHandler:
         try:
             # Ensure stream=True is explicitly passed for real streaming
             openai_params_for_stream = {**openai_params, "stream": True}
-            stream_response = await openai_client.chat.completions.create(
+            
+            # [核心修改]: 用 execute_with_retry 包裹原始的 create 方法
+            stream_response = await execute_with_retry(
+                openai_client.chat.completions.create,
                 **openai_params_for_stream,
                 extra_body=openai_extra_body
             )
@@ -403,7 +407,10 @@ class OpenAIDirectHandler:
         try:
             # Ensure stream=False is explicitly passed
             openai_params_non_stream = {**openai_params, "stream": False}
-            response = await openai_client.chat.completions.create(
+            
+            # [核心修改]: 用 execute_with_retry 包裹原始的 create 方法
+            response = await execute_with_retry(
+                openai_client.chat.completions.create,
                 **openai_params_non_stream,
                 extra_body=openai_extra_body
             )
