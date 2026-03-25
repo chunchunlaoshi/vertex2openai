@@ -2,6 +2,8 @@ import json
 import time
 import math
 import asyncio
+import httpx
+# 确保引入重试所需的库
 from typing import List, Dict, Any, Callable, Union, Optional
 
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -106,6 +108,40 @@ class StreamingReasoningProcessor:
 def create_openai_error_response(status_code: int, message: str, error_type: str) -> Dict[str, Any]:
     return {"error": {"message": message, "type": error_type, "code": status_code, "param": None}}
 
+async def execute_with_retry(func, *args, max_retries=5, **kwargs):
+    """
+    智能网络容错引擎：拦截 429/503 等瞬时网络错误，并执行指数退避重试。
+    适用于流式握手、非流式请求及 Fake Stream 的底层生成。
+    """
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            # 尝试执行真正的网络请求
+            return await func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            is_retryable = False
+            error_str = str(e).lower()
+            
+            # 捕获 HTTPX 异常 (Direct 模式)
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in [429, 503, 502]:
+                is_retryable = True
+            # 捕获 Gemini SDK 异常
+            elif hasattr(e, 'code') and e.code in [429, 503, 502]:
+                is_retryable = True
+            # 泛型文本匹配兜底
+            elif "429" in error_str or "503" in error_str or "too many requests" in error_str or "quota" in error_str:
+                is_retryable = True
+
+            if is_retryable and attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 指数退避: 1秒, 2秒, 4秒...
+                print(f"⚠️ 触发神性护盾 (API {e.__class__.__name__}): 遇到速率限制或服务器过载。正在进行第 {attempt + 1}/{max_retries} 次重试，等待 {wait_time} 秒...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"❌ 容错极限到达: 已穷尽 {max_retries} 次重试，抛出异常。")
+                raise e
+    raise last_exception
+    
 def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     config: Dict[str, Any] = {}
     
