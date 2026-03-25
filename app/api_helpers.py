@@ -124,7 +124,7 @@ def create_openai_error_response(status_code: int, message: str, error_type: str
         }
     }
 
-async def execute_with_retry(func, *args, max_retries=25, **kwargs):
+async def execute_with_retry(func, *args, max_retries=20, **kwargs):
     """
     智能网络容错引擎：拦截 429/503 等瞬时网络错误。
     当前策略：5轮波浪式重试 (5x5=25次)，每次波浪 [1s, 2s, 4s, 8s, 16s]。
@@ -147,8 +147,8 @@ async def execute_with_retry(func, *args, max_retries=25, **kwargs):
 
             if is_retryable and attempt < max_retries - 1:
                 # 核心黑科技：取模运算实现波浪退避
-                wave_index = attempt % 5
-                round_num = (attempt // 5) + 1
+                wave_index = attempt % 4
+                round_num = (attempt // 4) + 1
                 wait_time = 2 ** wave_index
                 
                 print(f"⚠️ 触发神性护盾 (API {e.__class__.__name__}): 遇到速率限制。正在进行第 {round_num} 轮第 {wave_index + 1} 次重试，等待 {wait_time} 秒...")
