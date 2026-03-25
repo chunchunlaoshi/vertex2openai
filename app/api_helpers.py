@@ -109,18 +109,29 @@ def create_openai_error_response(status_code: int, message: str, error_type: str
 def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     config: Dict[str, Any] = {}
     
-    # Check for -2k or -4k suffix to add image generation capabilities
+    # [新增]: 完美剥离并提取 System Prompt
+    system_texts = []
+    for msg in request.messages:
+        if msg.role == "system" and msg.content:
+            if isinstance(msg.content, str):
+                system_texts.append(msg.content)
+            elif isinstance(msg.content, list):
+                for part in msg.content:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        system_texts.append(part.get('text', ''))
+                    elif hasattr(part, 'text') and isinstance(part.text, str):
+                        system_texts.append(part.text)
+    if system_texts:
+        config["system_instruction"] = "\n".join(system_texts)
+    
+    # 以下保留你原有的配置逻辑
     model_name = request.model
     if model_name.endswith('-2k'):
-        # Add image generation config for 2k resolution
         config["responseModalities"] = ["TEXT", "IMAGE"]
         config["imageConfig"] = {"imageSize": "2k"}
-        print(f"Detected -2k suffix, adding image generation config with 2k resolution")
     elif model_name.endswith('-4k'):
-        # Add image generation config for 4k resolution
         config["responseModalities"] = ["TEXT", "IMAGE"]
         config["imageConfig"] = {"imageSize": "4k"}
-        print(f"Detected -4k suffix, adding image generation config with 4k resolution")
     
     if request.temperature is not None: config["temperature"] = request.temperature
     if request.max_tokens is not None: config["max_output_tokens"] = request.max_tokens
@@ -144,63 +155,51 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
             types.SafetySetting(category="HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", threshold=safety_threshold),
             types.SafetySetting(category="HARM_CATEGORY_JAILBREAK", threshold=safety_threshold)
     ]
-    # config["thinking_config"] = {"include_thoughts": True}
 
-    # 1. Add tools (function declarations)
+    # 处理 Tools
     function_declarations = []
     if request.tools:
         for tool in request.tools:
             if tool.get("type") == "function":
-                # func_def = tool.get("function")
                 func_def = tool
                 if func_def:
-                    # Extract only the fields accepted by the Gemini API
                     declaration = {
                         "name": func_def.get("name"),
                         "description": func_def.get("description"),
                     }
-                    # Get parameters and remove the $schema field if it exists
                     parameters = func_def.get("parameters")
                     if isinstance(parameters, dict) and "$schema" in parameters:
                         parameters = parameters.copy()
                         del parameters["$schema"]
                     if parameters is not None:
                         declaration["parameters"] = parameters
-
-                    # Remove keys with None values to keep the payload clean
                     declaration = {k: v for k, v in declaration.items() if v is not None}
-                    if declaration.get("name"):  # Ensure name exists
+                    if declaration.get("name"): 
                         function_declarations.append(declaration)
 
     if function_declarations:
         config["tools"] = [{"function_declarations": function_declarations}]
 
-    # 2. Add tool_config (based on tool_choice)
+    # 处理 Tool Config
     tool_config = None
     if request.tool_choice:
         choice = request.tool_choice
         mode = None
         allowed_functions = None
         if isinstance(choice, str):
-            if choice == "none":
-                mode = "NONE"
-            elif choice == "auto":
-                mode = "AUTO"
+            if choice == "none": mode = "NONE"
+            elif choice == "auto": mode = "AUTO"
         elif isinstance(choice, dict) and choice.get("type") == "function":
             func_name = choice.get("function", {}).get("name")
             if func_name:
-                mode = "ANY"  # 'ANY' mode is used to force a specific function call
+                mode = "ANY"
                 allowed_functions = [func_name]
-        
-        # If a valid mode was parsed, build the tool_config
         if mode:
             config_dict = {"mode": mode}
-            if allowed_functions:
-                config_dict["allowed_function_names"] = allowed_functions
+            if allowed_functions: config_dict["allowed_function_names"] = allowed_functions
             tool_config = {"function_calling_config": config_dict}
     
-    if tool_config:
-        config["tool_config"] = tool_config
+    if tool_config: config["tool_config"] = tool_config
         
     return config
 
