@@ -105,8 +105,24 @@ class StreamingReasoningProcessor:
         self.tag_buffer, self.reasoning_buffer = "", ""
         return remaining_content, remaining_reasoning
 
+import re
+from typing import Dict, Any
+
 def create_openai_error_response(status_code: int, message: str, error_type: str) -> Dict[str, Any]:
-    return {"error": {"message": message, "type": error_type, "code": status_code, "param": None}}
+    """
+    生成标准 OpenAI 格式的错误响应，并强制剥离所有 URL 中可能泄露的 API Key。
+    """
+    # 使用正则匹配 URL 参数中的 key=... 及其后的值，并替换为安全占位符
+    safe_message = re.sub(r'([?&]key=)[^&\s\'"]+', r'\1***HIDDEN_API_KEY***', message)
+    
+    return {
+        "error": {
+            "message": safe_message,
+            "type": error_type,
+            "code": status_code,
+            "param": None
+        }
+    }
 
 async def execute_with_retry(func, *args, max_retries=5, **kwargs):
     """
