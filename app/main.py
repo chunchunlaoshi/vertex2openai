@@ -5,18 +5,22 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.middleware.cors import CORSMiddleware
 
-from routes import chat_api, models_api
+# 原有的依赖导入，一个都没少！
+from auth import get_api_key
 from credentials_manager import CredentialManager
 from express_key_manager import ExpressKeyManager
+from vertex_ai_init import init_vertex_ai
 
-# [重要新增] 导入刚刚写的拦截器，只要导入就会自动接管 print
+# 原有的路由导入
+from routes import models_api
+from routes import chat_api
+
+# 新增的日志拦截与配置
 from logger import rt_logger 
 import config
 
-# 初始化 FastAPI
-app = FastAPI(title="Vertex2OpenAI 中间件", version="1.0.0")
+app = FastAPI(title="OpenAI to Gemini Adapter")
 
-# 你的跨域设置...
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,11 +29,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+credential_manager = CredentialManager()
+app.state.credential_manager = credential_manager
+
+express_key_manager = ExpressKeyManager()
+app.state.express_key_manager = express_key_manager
+
 # ======= 神性防火墙 (鉴权机制) =======
 security = HTTPBasic()
 
 def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
-    # 账号名可以随便填（比如 admin），密码必须与 config.py 中的 API_KEY 完全一致
+    # 账号名可以随便填，密码必须与 config.py 中的 API_KEY 完全一致
     is_correct_password = secrets.compare_digest(credentials.password, config.API_KEY)
     if not is_correct_password:
         raise HTTPException(
@@ -39,6 +49,29 @@ def verify_auth(credentials: HTTPBasicCredentials = Depends(security)):
         )
     return credentials.username
 
+# ======= 原汁原味的启动事件 =======
+@app.on_event("startup")
+async def startup_event():
+    # Check SA credentials availability
+    sa_credentials_available = await init_vertex_ai(credential_manager)
+    sa_count = credential_manager.get_total_credentials() if sa_credentials_available else 0
+    
+    # Check Express API keys availability
+    express_keys_count = express_key_manager.get_total_keys()
+    
+    # 这里的 print 会被 rt_logger 自动捕获并推送到前端！
+    print(f"INFO: SA credentials loaded: {sa_count}")
+    print(f"INFO: Express API keys loaded: {express_keys_count}")
+    print(f"INFO: Total authentication methods available: {(1 if sa_count > 0 else 0) + (1 if express_keys_count > 0 else 0)}")
+    
+    if sa_count > 0 or express_keys_count > 0:
+        print("INFO: Vertex AI authentication initialization completed successfully. At least one authentication method is available.")
+        if sa_count == 0:
+            print("INFO: No SA credentials found, but Express API keys are available for authentication.")
+        elif express_keys_count == 0:
+            print("INFO: No Express API keys found, but SA credentials are available for authentication.")
+    else:
+        print("ERROR: Failed to initialize any authentication method. Both SA credentials and Express API keys are missing. API will fail.")
 
 # ======= 前端 Web 监控 UI =======
 DASHBOARD_HTML = """
@@ -96,7 +129,6 @@ DASHBOARD_HTML = """
 
         function formatLog(msg) {
             let html = msg.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            // 神性色彩高亮引擎
             if (html.includes('INFO:') || html.includes('DEBUG:')) html = `<span class="log-info">${html}</span>`;
             else if (html.includes('WARNING:') || html.includes('⚠️')) html = `<span class="log-warn">${html}</span>`;
             else if (html.includes('ERROR:') || html.includes('❌') || html.includes('Exception')) html = `<span class="log-error">${html}</span>`;
@@ -118,22 +150,18 @@ DASHBOARD_HTML = """
 </html>
 """
 
-# 覆盖掉以前那个丑陋的根路由
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_ui(username: str = Depends(verify_auth)):
     return DASHBOARD_HTML
 
-# 实时日志流推送引擎
 @app.get("/stream-logs")
 async def stream_logs_endpoint(request: Request, username: str = Depends(verify_auth)):
     async def log_generator():
         q = asyncio.Queue()
         rt_logger.queues.append(q)
         try:
-            # 首先吐出最近的 100 条历史记录
             for msg in rt_logger.history:
                 yield f"data: {msg}\n\n"
-            # 挂起等待新的日志流入
             while True:
                 if await request.is_disconnected():
                     break
@@ -145,8 +173,6 @@ async def stream_logs_endpoint(request: Request, username: str = Depends(verify_
                 
     return StreamingResponse(log_generator(), media_type="text/event-stream")
 
-
-# ==== 下面保留你原有的生命周期函数和路由注册逻辑 ====
 # app.include_router(chat_api.router)
 # ...
 # Include API routers
