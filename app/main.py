@@ -93,6 +93,12 @@ DASHBOARD_HTML = """
         .log-warn { color: #fbbf24; font-weight: 500; }
         .log-error { color: #ef4444; font-weight: bold; }
         .log-success { color: #34d399; }
+        
+        /* ===== 以下为新增的词法高亮霓虹样式 ===== */
+        .hl-model { color: #10b981; font-weight: bold; text-shadow: 0 0 5px rgba(16,185,129,0.3); } /* 翠绿色高亮模型 */
+        .hl-number { color: #f472b6; font-weight: bold; } /* 亮粉色高亮所有数字 */
+        .hl-keyword { color: #d946ef; } /* 紫色高亮 Token 相关的关键字 */
+        .hl-express { color: #818cf8; font-weight: bold; } /* 靛蓝色高亮内部路由标识 */
     </style>
 </head>
 <body class="h-screen flex flex-col items-center justify-center p-4">
@@ -128,13 +134,32 @@ DASHBOARD_HTML = """
         });
 
         function formatLog(msg) {
+            // 基础转义，防止 XSS
             let html = msg.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            if (html.includes('INFO:') || html.includes('DEBUG:')) html = `<span class="log-info">${html}</span>`;
-            else if (html.includes('WARNING:') || html.includes('⚠️')) html = `<span class="log-warn">${html}</span>`;
-            else if (html.includes('ERROR:') || html.includes('❌') || html.includes('Exception')) html = `<span class="log-error">${html}</span>`;
-            else if (html.includes('200 OK') || html.includes('SUCCESS')) html = `<span class="log-success">${html}</span>`;
-            else html = `<span class="text-slate-400">${html}</span>`;
-            return `<div>${html}</div>`;
+
+            // --- 词法级深度着色 (Word-level Highlighting) ---
+            
+            // 1. 抓取并高亮模型名称 (捕捉所有 gemini- 开头的标识)
+            html = html.replace(/(gemini-[a-zA-Z0-9\-\.]+)/g, '<span class="hl-model">$1</span>');
+            
+            // 2. 抓取并高亮算力消耗与 Token 关键字
+            html = html.replace(/(提示词:|思考与生成:|总计:|Tokens?)/g, '<span class="hl-keyword">$1</span>');
+            
+            // 3. 抓取 Express 路由标识符
+            html = html.replace(/(\[EXPRESS\]|\[OpenAI Express Path\])/g, '<span class="hl-express">$1</span>');
+            
+            // 4. 抓取并高亮所有独立数字 (利用负向先行断言，绝不破坏已被高亮的 HTML 结构)
+            html = html.replace(/\b(\d+)\b(?![^<]*>)/g, '<span class="hl-number">$1</span>');
+
+            // --- 行级底色判定 (Line-level Base Color) ---
+            let lineClass = "text-slate-400"; // 默认灰白色
+            if (html.includes('INFO:') || html.includes('DEBUG:')) lineClass = "log-info";
+            else if (html.includes('WARNING:') || html.includes('⚠️')) lineClass = "log-warn";
+            else if (html.includes('ERROR:') || html.includes('❌') || html.includes('Exception')) lineClass = "log-error";
+            else if (html.includes('200 OK') || html.includes('SUCCESS') || html.includes('💰')) lineClass = "log-success";
+
+            // 组装并返回最终的 DOM 节点
+            return `<div class="${lineClass}">${html}</div>`;
         }
 
         eventSource.onmessage = function(event) {
