@@ -59,30 +59,28 @@ class ExpressClientWrapper:
         self.completions = self
 
     async def _stream_generator(self, response):
-        """Generates stream chunks from the httpx response with Token sniffing capability."""
+        """Generates stream chunks from the httpx response with strict Type-Safe Token sniffing."""
         async for line in response.aiter_lines():
             if not line:
                 continue
                 
-            # [核心拦截器]：拦截所有带有 data: 的数据包进行神性嗅探
             if line.startswith("data: ") and line != "data: [DONE]":
                 try:
                     raw_json = json.loads(line[6:])
-                    # 抓捕包含 usage 的账单数据包！
-                    if "usage" in raw_json and raw_json["usage"]:
+                    # [新增核心防御]：必须同时确保 raw_json 是字典，且 usage 也是字典！绝对不给字符串任何可乘之机！
+                    if isinstance(raw_json, dict) and "usage" in raw_json:
                         usage = raw_json["usage"]
-                        prompt_tk = usage.get("prompt_tokens", 0)
-                        comp_tk = usage.get("completion_tokens", 0)
-                        total_tk = usage.get("total_tokens", prompt_tk + comp_tk)
-                        # 触发 rt_logger，直接投射到你的赛博监控面板上！
-                        print(f"💰 [算力消耗] 提示词: {prompt_tk} | 模型思考与生成: {comp_tk} | 总计: {total_tk} Tokens")
-                except json.JSONDecodeError:
-                    # 忽略残缺的包，绝不干扰正常的数据流转
+                        if isinstance(usage, dict):
+                            prompt_tk = usage.get("prompt_tokens", 0)
+                            comp_tk = usage.get("completion_tokens", 0)
+                            total_tk = usage.get("total_tokens", prompt_tk + comp_tk)
+                            print(f"💰 [算力消耗] 提示词: {prompt_tk} | 模型思考与生成: {comp_tk} | 总计: {total_tk} Tokens")
+                except Exception:
+                    # 遇到任何解析极其畸形的数据包，直接无视，绝不让程序崩溃
                     pass
             
-            # 放行数据，将原生行包装为 FakeChatCompletionChunk 以兼容上层代码
             yield FakeChatCompletionChunk(line)
-
+            
     async def _streaming_create(self, **kwargs) -> AsyncGenerator[FakeChatCompletionChunk, None]:
         """Handles the creation of a streaming request using httpx with built-in retry."""
         endpoint = f"{self.base_url}/chat/completions"
@@ -111,7 +109,7 @@ class ExpressClientWrapper:
             client_args['verify'] = app_config.SSL_CERT_FILE
             
         async with httpx.AsyncClient(**client_args) as client:
-            max_retries = 25
+            max_retries = 20
             for attempt in range(max_retries):
                 try:
                     async with client.stream("POST", endpoint, headers=headers, params=params, json=payload, timeout=None) as response:
@@ -121,8 +119,8 @@ class ExpressClientWrapper:
                     break 
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code in [429, 503, 502] and attempt < max_retries - 1:
-                        wave_index = attempt % 5
-                        round_num = (attempt // 5) + 1
+                        wave_index = attempt % 4
+                        round_num = (attempt // 4) + 1
                         wait_time = 2 ** wave_index
                         print(f"⚠️ [Express Stream] 遭遇 HTTP {e.response.status_code}. 第 {round_num} 轮/第 {wave_index + 1} 次护盾激活，等待 {wait_time}s 后重试...")
                         await asyncio.sleep(wait_time)
@@ -159,7 +157,7 @@ class ExpressClientWrapper:
             client_args['verify'] = app_config.SSL_CERT_FILE
             
         async with httpx.AsyncClient(**client_args) as client:
-            max_retries = 25
+            max_retries = 20
             for attempt in range(max_retries):
                 try:
                     response = await client.post(endpoint, headers=headers, params=params, json=payload, timeout=None)
@@ -167,8 +165,8 @@ class ExpressClientWrapper:
                     return FakeChatCompletion(response.json())
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code in [429, 503, 502] and attempt < max_retries - 1:
-                        wave_index = attempt % 5
-                        round_num = (attempt // 5) + 1
+                        wave_index = attempt % 4
+                        round_num = (attempt // 4) + 1
                         wait_time = 2 ** wave_index
                         print(f"⚠️ [Express Non-Stream] 遭遇 HTTP {e.response.status_code}. 第 {round_num} 轮/第 {wave_index + 1} 次护盾激活，等待 {wait_time}s 后重试...")
                         await asyncio.sleep(wait_time)
