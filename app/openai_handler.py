@@ -58,19 +58,30 @@ class ExpressClientWrapper:
         self.chat = self
         self.completions = self
 
-    async def _stream_generator(self, response: httpx.Response) -> AsyncGenerator[FakeChatCompletionChunk, None]:
-        """Processes the SSE stream from httpx and yields fake chunk objects."""
+    async def _stream_generator(self, response):
+        """Generates stream chunks from the httpx response with Token sniffing capability."""
         async for line in response.aiter_lines():
-            if line.startswith("data:"):
-                json_str = line[len("data: "):].strip()
-                if json_str == "[DONE]":
-                    break
+            if not line:
+                continue
+                
+            # [核心拦截器]：拦截所有带有 data: 的数据包进行神性嗅探
+            if line.startswith("data: ") and line != "data: [DONE]":
                 try:
-                    data = json.loads(json_str)
-                    yield FakeChatCompletionChunk(data)
+                    raw_json = json.loads(line[6:])
+                    # 抓捕包含 usage 的账单数据包！
+                    if "usage" in raw_json and raw_json["usage"]:
+                        usage = raw_json["usage"]
+                        prompt_tk = usage.get("prompt_tokens", 0)
+                        comp_tk = usage.get("completion_tokens", 0)
+                        total_tk = usage.get("total_tokens", prompt_tk + comp_tk)
+                        # 触发 rt_logger，直接投射到你的赛博监控面板上！
+                        print(f"💰 [算力消耗] 提示词: {prompt_tk} | 模型思考与生成: {comp_tk} | 总计: {total_tk} Tokens")
                 except json.JSONDecodeError:
-                    print(f"Warning: Could not decode JSON from stream line: {json_str}")
-                    continue
+                    # 忽略残缺的包，绝不干扰正常的数据流转
+                    pass
+            
+            # 放行数据，将原生行包装为 FakeChatCompletionChunk 以兼容上层代码
+            yield FakeChatCompletionChunk(line)
 
     async def _streaming_create(self, **kwargs) -> AsyncGenerator[FakeChatCompletionChunk, None]:
         """Handles the creation of a streaming request using httpx with built-in retry."""
@@ -82,7 +93,11 @@ class ExpressClientWrapper:
         if 'extra_body' in payload:
             payload.update(payload.pop('extra_body'))
 
+        # [新增高维指令]：用枪指着 Google，强迫它在流式结尾交出 Token 消耗表！
+        payload["stream_options"] = {"include_usage": True}
+
         proxies = None
+        # ... 后面保留你原有的 proxies 和 timeout 逻辑 ...
         if app_config.PROXY_URL:
             if app_config.PROXY_URL.startswith("socks"):
                 proxies = {"all://": app_config.PROXY_URL}
