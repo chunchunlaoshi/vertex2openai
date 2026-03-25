@@ -160,13 +160,22 @@ async def stream_logs_endpoint(request: Request, username: str = Depends(verify_
         q = asyncio.Queue()
         rt_logger.queues.append(q)
         try:
+            # 首先吐出历史记录
             for msg in rt_logger.history:
                 yield f"data: {msg}\n\n"
+                
+            # 心跳监听循环
             while True:
                 if await request.is_disconnected():
                     break
-                msg = await q.get()
-                yield f"data: {msg}\n\n"
+                try:
+                    # 黑科技：最多等 1 秒。如果 1 秒内没日志（比如正在 sleep 退避），就抛出超时异常
+                    msg = await asyncio.wait_for(q.get(), timeout=1.0)
+                    yield f"data: {msg}\n\n"
+                except asyncio.TimeoutError:
+                    # 捕获超时后，向浏览器发送 SSE 标准协议中的“隐形注释包”
+                    # 这个包不会在前端显示，但能欺骗浏览器保持 TCP 连接永远不断！
+                    yield ": keep-alive heartbeat\n\n"
         finally:
             if q in rt_logger.queues:
                 rt_logger.queues.remove(q)
