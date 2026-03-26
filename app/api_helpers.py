@@ -162,7 +162,6 @@ async def execute_with_retry(func, *args, max_retries=20, **kwargs):
 def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     config: Dict[str, Any] = {}
     
-    # [新增]: 完美剥离并提取 System Prompt
     system_texts = []
     for msg in request.messages:
         if msg.role == "system" and msg.content:
@@ -177,14 +176,11 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if system_texts:
         config["system_instruction"] = "\n".join(system_texts)
     
-    # 以下保留你原有的配置逻辑
-    model_name = request.model
-    if model_name.endswith('-2k'):
-        config["responseModalities"] = ["TEXT", "IMAGE"]
-        config["imageConfig"] = {"imageSize": "2k"}
-    elif model_name.endswith('-4k'):
-        config["responseModalities"] = ["TEXT", "IMAGE"]
-        config["imageConfig"] = {"imageSize": "4k"}
+    # ==========================================
+    # 核心：只要包含 image，立刻下发生图模态指令 (使用正确的蛇形命名)
+    # ==========================================
+    if "image" in request.model.lower():
+        config["response_modalities"] = ["TEXT", "IMAGE"]
     
     if request.temperature is not None: config["temperature"] = request.temperature
     if request.max_tokens is not None: config["max_output_tokens"] = request.max_tokens
@@ -209,7 +205,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
             types.SafetySetting(category="HARM_CATEGORY_JAILBREAK", threshold=safety_threshold)
     ]
 
-    # 处理 Tools
     function_declarations = []
     if request.tools:
         for tool in request.tools:
@@ -233,7 +228,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if function_declarations:
         config["tools"] = [{"function_declarations": function_declarations}]
 
-    # 处理 Tool Config
     tool_config = None
     if request.tool_choice:
         choice = request.tool_choice
@@ -486,8 +480,14 @@ async def execute_gemini_call(
     # 在 execute_gemini_call 函数内部：
 
     if request_obj.stream:
-        if app_config.FAKE_STREAMING_ENABLED:
-            # Fake streaming 内部已经有独立 task，这里直接返回
+        # ==========================================
+        # 核心：Google 生图不支持真流式！探测到 image 必须强制切入假流式！
+        # ==========================================
+        is_image_request = "image" in request_obj.model.lower()
+        
+        if app_config.FAKE_STREAMING_ENABLED or is_image_request:
+            if is_image_request:
+                 print("INFO: 触发生图保护机制 —— 已强制切换为假流式输出以避开 Google 报错限制！")
             return StreamingResponse(
                 gemini_fake_stream_generator(
                     current_client, model_to_call, actual_prompt_for_call,
