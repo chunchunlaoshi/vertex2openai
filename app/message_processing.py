@@ -73,7 +73,7 @@ def _extract_markdown_images_to_parts(text: str) -> Tuple[List[types.Part], str]
         parts.reverse()
     
     # Clean up any extra whitespace that might be left
-    remaining_text = re.sub(r'\s+', ' ', remaining_text).strip()
+    remaining_text = remaining_text.strip()
     
     return parts, remaining_text
 
