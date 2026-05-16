@@ -10,3 +10,4 @@ google-auth-oauthlib
 aiohttp
 pydantic-settings>=2.2.1
 tenacity>=8.2.3
+rich>=13.0.0
