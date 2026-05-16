@@ -6,10 +6,17 @@ from model_loader import get_vertex_models, get_vertex_express_models, refresh_m
 from credentials_manager import CredentialManager
 
 router = APIRouter()
+_last_model_fetch_time = 0  # 增加全局缓存时间戳
 
 @router.get("/v1/models")
 async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_key)):
-    await refresh_models_config_cache()
+    global _last_model_fetch_time
+    
+    # 【Bug 修复】：1小时内只向 GitHub 请求一次，彻底避免被封杀和连接超时
+    current_time = time.time()
+    if current_time - _last_model_fetch_time > 3600:
+        await refresh_models_config_cache()
+        _last_model_fetch_time = current_time
     
     PAY_PREFIX = "[PAY]"
     EXPRESS_PREFIX = "[EXPRESS] "
@@ -27,37 +34,23 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     
     final_model_list: List[Dict[str, Any]] = []
     processed_ids: Set[str] = set()
-    current_time = int(time.time())
 
     def add_model_and_variants(base_id: str, prefix: str):
-        """Adds a model and its variants to the list if not already present."""
-        
-        # Define all possible suffixes for a given model
-        suffixes = [""] # For the base model itself
-        
-        is_gemini = "gemini" in base_id.lower()
-        
-        if is_gemini:
-            # OpenAI Direct 模式
+        suffixes = [""] 
+        if "gemini" in base_id.lower():
             suffixes.append(OPENAI_DIRECT_SUFFIX)
-            
-            # 搜索特性（2.0以下模型基本不支持）
             if not base_id.startswith("gemini-2.0"):
                 suffixes.extend(["-search", OPENAI_SEARCH_SUFFIX])
 
-        # Imagen 模型 (生图) 自动跳过上面的 if 判断，不添加任何乱七八糟的文本后缀，防止报错
-
         for suffix in suffixes:
             model_id_with_suffix = f"{base_id}{suffix}"
-            
-            # Experimental models have no prefix
             final_id = f"{prefix}{model_id_with_suffix}" if "-exp-" not in base_id else model_id_with_suffix
 
             if final_id not in processed_ids:
                 final_model_list.append({
                     "id": final_id,
                     "object": "model",
-                    "created": current_time,
+                    "created": int(current_time),
                     "owned_by": "google",
                     "permission": [],
                     "root": base_id,
@@ -65,14 +58,9 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
                 })
                 processed_ids.add(final_id)
 
-    # Process Express Key models first
     if has_express_key:
-        for model_id in raw_express_models:
-            add_model_and_variants(model_id, EXPRESS_PREFIX)
-
-    # Process Service Account (PAY) models, they have lower priority
+        for model_id in raw_express_models: add_model_and_variants(model_id, EXPRESS_PREFIX)
     if has_sa_creds:
-        for model_id in raw_vertex_models:
-            add_model_and_variants(model_id, PAY_PREFIX)
+        for model_id in raw_vertex_models: add_model_and_variants(model_id, PAY_PREFIX)
 
     return {"object": "list", "data": sorted(final_model_list, key=lambda x: x['id'])}
