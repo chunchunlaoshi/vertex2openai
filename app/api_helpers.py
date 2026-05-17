@@ -231,7 +231,7 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     is_image_model = "image" in request.model.lower()
     
     if is_image_model:
-        config["response_modalities"] = ["IMAGE"]
+        config["response_modalities"] = ["TEXT", "IMAGE"]
         
         target_ar = "1:1"
         req_dict = request.model_dump()
