@@ -4,6 +4,7 @@ import math
 import asyncio
 import httpx
 import re
+import random  # 【核心修复】：补齐确实的 random 库，防止生成工具 ID 时报 NameError
 from typing import List, Dict, Any, Callable, Union, Optional
 
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -341,7 +342,7 @@ def convert_chunk_to_openai(chunk: Any, model_name: str, response_id: str, candi
                 if hasattr(part, 'function_call') and part.function_call is not None: 
                     fc = part.function_call
                     
-                    # 【防 400 核心修复】提取流式传输中的原生 thought_signature
+                    # 提取流式传输中的原生 thought_signature
                     real_id = getattr(fc, 'id', None)
                     if not real_id: real_id = getattr(fc, 'thought_signature', None)
                     
