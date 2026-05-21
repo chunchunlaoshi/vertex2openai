@@ -26,41 +26,27 @@ def extract_reasoning_by_tags(full_text: str, tag_name: str) -> Tuple[str, str]:
     return reasoning_content.strip(), normal_text.strip()
 
 def _extract_markdown_images_to_parts(text: str) -> Tuple[List[types.Part], str]:
-    """
-    Extract markdown images from text and convert them to Gemini Parts.
-    Returns a tuple of (image_parts, text_without_images)
-    """
     parts = []
     remaining_text = text
-    
-    # Pattern to match markdown images with data URLs
     pattern = r'!\[[^\]]*\]\(data:(image/[a-zA-Z0-9+.-]+);base64,([a-zA-Z0-9+/=]+)\)'
-    
     matches = list(re.finditer(pattern, text))
     
     if matches:
         for match in reversed(matches):
             mime_type = match.group(1)
             b64_data = match.group(2)
-            
             if not mime_type.startswith('image/'):
                 continue
-            
             try:
                 image_bytes = base64.b64decode(b64_data)
                 parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
-                
                 start, end = match.span()
                 remaining_text = remaining_text[:start] + remaining_text[end:]
-                
-                print(f"Extracted markdown image with mime type: {mime_type}")
             except Exception as e:
                 print(f"Error extracting markdown image: {e}")
-        
         parts.reverse()
     
     remaining_text = re.sub(r'[ \t]+', ' ', remaining_text).strip()
-    
     return parts, remaining_text
 
 def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
@@ -87,10 +73,19 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
                 except json.JSONDecodeError:
                     tool_output_data = {"result": str(message.content)}
 
-                parts.append(types.Part.from_function_response(
+                resp_part = types.Part.from_function_response(
                     name=message.name,
                     response=tool_output_data
-                ))
+                )
+                
+                # 【防 400 核心修复】：向 FunctionResponse 重新注入底层签名
+                if hasattr(resp_part, 'function_response') and resp_part.function_response is not None:
+                    try: resp_part.function_response.id = message.tool_call_id
+                    except Exception: pass
+                    try: resp_part.function_response.thought_signature = message.tool_call_id
+                    except Exception: pass
+
+                parts.append(resp_part)
                 current_gemini_role = "function"
             else:
                 continue
@@ -100,15 +95,28 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
                 function_call_data = tool_call.get("function", {})
                 function_name = function_call_data.get("name")
                 arguments_str = function_call_data.get("arguments", "{}")
+                tool_call_id = tool_call.get("id")
+                
                 try:
                     parsed_arguments = json.loads(arguments_str)
                 except json.JSONDecodeError:
                     parsed_arguments = {} 
+                    
                 if function_name:
-                    parts.append(types.Part.from_function_call(
+                    fc_part = types.Part.from_function_call(
                         name=function_name,
                         args=parsed_arguments
-                    ))
+                    )
+                    
+                    # 【防 400 核心修复】：向 FunctionCall 重新注入防伪 thought_signature
+                    if tool_call_id and hasattr(fc_part, 'function_call') and fc_part.function_call is not None:
+                        try: fc_part.function_call.id = tool_call_id
+                        except Exception: pass
+                        try: fc_part.function_call.thought_signature = tool_call_id
+                        except Exception: pass
+                        
+                    parts.append(fc_part)
+                    
             if message.content:
                 if isinstance(message.content, str):
                     image_parts, clean_text = _extract_markdown_images_to_parts(message.content)
@@ -210,19 +218,14 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
     return merged_messages
 
 def _create_safety_ratings_html(safety_ratings: list) -> str:
-    """Generates a styled HTML block for safety ratings."""
     if not safety_ratings:
         return ""
-
     highest_rating = max(safety_ratings, key=lambda r: r.probability_score)
     highest_score = highest_rating.probability_score
 
-    if highest_score <= 0.33:
-        color = "#0f8"  
-    elif highest_score <= 0.66:
-        color = "yellow"
-    else:
-        color = "#bf555d"
+    if highest_score <= 0.33: color = "#0f8"  
+    elif highest_score <= 0.66: color = "yellow"
+    else: color = "#bf555d"
 
     summary_category = highest_rating.category.name.replace('HARM_CATEGORY_', '').replace('_', ' ').title()
     summary_probability = highest_rating.probability.name
@@ -240,7 +243,6 @@ def _create_safety_ratings_html(safety_ratings: list) -> str:
     all_ratings_str = '\n'.join(ratings_list)
 
     css_style = "<style>.cb{border:1px solid #444;margin:10px;border-radius:4px;background:#111}.cb summary{padding:8px;cursor:pointer;background:#222}.cb pre{margin:0;padding:10px;border-top:1px solid #444;white-space:pre-wrap}</style>"
-
     html_output = (
         f'{css_style}'
         f'<details class="cb">'
@@ -248,11 +250,9 @@ def _create_safety_ratings_html(safety_ratings: list) -> str:
         f'<pre>\\n--- Safety Ratings ---\\n{all_ratings_str}\\n</pre>'
         f'</details>'
     )
-
     return html_output
 
 def _convert_image_to_markdown(image_data: bytes, mime_type: str) -> str:
-    """Convert image data to markdown format with base64 encoding."""
     try:
         b64_data = base64.b64encode(image_data).decode('utf-8')
         data_url = f"data:{mime_type};base64,{b64_data}"
@@ -280,29 +280,24 @@ def parse_gemini_response_for_reasoning_and_content(gemini_response_candidate: A
             part_text = ""
             if hasattr(part_item, 'text') and part_item.text is not None:
                 part_text = str(part_item.text)
-            
             elif hasattr(part_item, 'inline_data') and part_item.inline_data is not None:
                 inline_data = part_item.inline_data
                 if hasattr(inline_data, 'data') and hasattr(inline_data, 'mime_type'):
                     image_bytes = inline_data.data
                     mime_type = inline_data.mime_type
                     part_text = _convert_image_to_markdown(image_bytes, mime_type)
-            
             elif hasattr(part_item, 'file_data') and part_item.file_data is not None:
                 file_data = part_item.file_data
                 if hasattr(file_data, 'file_uri'):
                     file_uri = file_data.file_uri
                     part_text = f"![Image]({file_uri})"
-                    print(f"Image file reference found: {file_uri}")
             
             part_is_thought = hasattr(part_item, 'thought') and part_item.thought is True
 
-            if part_is_thought:
-                reasoning_text_parts.append(part_text)
-            elif part_text: 
-                normal_text_parts.append(part_text)
-    elif candidate_part_text:
-        normal_text_parts.append(candidate_part_text)
+            if part_is_thought: reasoning_text_parts.append(part_text)
+            elif part_text: normal_text_parts.append(part_text)
+            
+    elif candidate_part_text: normal_text_parts.append(candidate_part_text)
     elif gemini_candidate_content and hasattr(gemini_candidate_content, 'text') and gemini_candidate_content.text is not None:
         normal_text_parts.append(str(gemini_candidate_content.text))
     elif hasattr(gemini_response_candidate, 'text') and gemini_response_candidate.text is not None and not gemini_candidate_content: 
@@ -335,7 +330,15 @@ def process_gemini_response_to_openai_dict(gemini_response_obj: Any, request_mod
                 for part in candidate.content.parts:
                     if hasattr(part, 'function_call') and part.function_call is not None: 
                         fc = part.function_call
-                        tool_call_id = f"call_{base_id}_{i}_{fc.name.replace(' ', '_')}_{int(time.time()*10000 + random.randint(0,9999))}"
+                        
+                        # 【防 400 核心修复】：拦截出云端返回的原生 thought_signature 或 id，原路封送！
+                        real_id = getattr(fc, 'id', None)
+                        if not real_id: real_id = getattr(fc, 'thought_signature', None)
+                        
+                        if real_id:
+                            tool_call_id = real_id
+                        else:
+                            tool_call_id = f"call_{base_id}_{i}_{fc.name.replace(' ', '_')}_{int(time.time()*10000 + random.randint(0,9999))}"
                         
                         if "tool_calls" not in message_payload:
                             message_payload["tool_calls"] = []
@@ -354,21 +357,16 @@ def process_gemini_response_to_openai_dict(gemini_response_obj: Any, request_mod
             
             if not function_call_detected:
                 reasoning_str, normal_content_str = parse_gemini_response_for_reasoning_and_content(candidate)
-                
                 if app_config.SAFETY_SCORE and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
                     safety_html = _create_safety_ratings_html(candidate.safety_ratings)
-                    if reasoning_str:
-                        reasoning_str += safety_html
-                    else:
-                        normal_content_str += safety_html
+                    if reasoning_str: reasoning_str += safety_html
+                    else: normal_content_str += safety_html
                 
                 message_payload["content"] = normal_content_str
-                if reasoning_str:
-                    message_payload['reasoning_content'] = reasoning_str
+                if reasoning_str: message_payload['reasoning_content'] = reasoning_str
             
             choice_item = {"index": i, "message": message_payload, "finish_reason": openai_finish_reason}
-            if hasattr(candidate, 'logprobs') and candidate.logprobs is not None:
-                 choice_item["logprobs"] = candidate.logprobs
+            if hasattr(candidate, 'logprobs') and candidate.logprobs is not None: choice_item["logprobs"] = candidate.logprobs
             choices.append(choice_item)
             
     elif hasattr(gemini_response_obj, 'text') and gemini_response_obj.text is not None:
@@ -383,16 +381,13 @@ def process_gemini_response_to_openai_dict(gemini_response_obj: Any, request_mod
         if hasattr(um, 'prompt_token_count'): usage_data['prompt_tokens'] = um.prompt_token_count
         if hasattr(um, 'candidates_token_count'):
             usage_data['completion_tokens'] = um.candidates_token_count
-            if hasattr(um, 'total_token_count'): 
-                 usage_data['total_tokens'] = um.total_token_count
-            else: 
-                 usage_data['total_tokens'] = usage_data['prompt_tokens'] + usage_data['completion_tokens']
+            if hasattr(um, 'total_token_count'): usage_data['total_tokens'] = um.total_token_count
+            else: usage_data['total_tokens'] = usage_data['prompt_tokens'] + usage_data['completion_tokens']
         elif hasattr(um, 'total_token_count'): 
              usage_data['total_tokens'] = um.total_token_count
              if usage_data['prompt_tokens'] > 0 and usage_data['total_tokens'] > usage_data['prompt_tokens']:
                  usage_data['completion_tokens'] = usage_data['total_tokens'] - usage_data['prompt_tokens']
-        else: 
-            usage_data['total_tokens'] = usage_data['prompt_tokens'] 
+        else: usage_data['total_tokens'] = usage_data['prompt_tokens'] 
 
     return {
         "id": base_id, "object": "chat.completion", "created": response_timestamp,
@@ -402,75 +397,3 @@ def process_gemini_response_to_openai_dict(gemini_response_obj: Any, request_mod
 
 def convert_to_openai_format(gemini_response: Any, model: str) -> Dict[str, Any]:
     return process_gemini_response_to_openai_dict(gemini_response, model)
-
-def convert_chunk_to_openai(chunk: Any, model_name: str, response_id: str, candidate_index: int = 0) -> str:
-    delta_payload = {}
-    openai_finish_reason = None
-
-    if hasattr(chunk, 'candidates') and chunk.candidates:
-        candidate = chunk.candidates[0] 
-        raw_gemini_finish_reason = getattr(candidate, 'finish_reason', None)
-        if raw_gemini_finish_reason:
-            if hasattr(raw_gemini_finish_reason, 'name'): raw_gemini_finish_reason_str = raw_gemini_finish_reason.name.upper()
-            else: raw_gemini_finish_reason_str = str(raw_gemini_finish_reason).upper()
-
-            if raw_gemini_finish_reason_str == "STOP": openai_finish_reason = "stop"
-            elif raw_gemini_finish_reason_str == "MAX_TOKENS": openai_finish_reason = "length"
-            elif raw_gemini_finish_reason_str == "SAFETY": openai_finish_reason = "content_filter"
-            elif raw_gemini_finish_reason_str in ["TOOL_CODE", "FUNCTION_CALL"]: openai_finish_reason = "tool_calls"
-
-        function_call_detected_in_chunk = False
-        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
-            for part in candidate.content.parts:
-                if hasattr(part, 'function_call') and part.function_call is not None: 
-                    fc = part.function_call
-                    tool_call_id = f"call_{response_id}_{candidate_index}_{fc.name.replace(' ', '_')}_{int(time.time()*10000 + random.randint(0,9999))}"
-                    
-                    current_tool_call_delta = {
-                        "index": 0, 
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {"name": fc.name}
-                    }
-                    if fc.args is not None: 
-                        current_tool_call_delta["function"]["arguments"] = json.dumps(fc.args)
-                    else: 
-                        current_tool_call_delta["function"]["arguments"] = "" 
-
-                    if "tool_calls" not in delta_payload:
-                        delta_payload["tool_calls"] = []
-                    delta_payload["tool_calls"].append(current_tool_call_delta)
-                    
-                    delta_payload["content"] = None 
-                    function_call_detected_in_chunk = True
-                    break 
-
-        if not function_call_detected_in_chunk:
-            reasoning_text, normal_text = parse_gemini_response_for_reasoning_and_content(candidate)
-
-            if app_config.SAFETY_SCORE and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
-                safety_html = _create_safety_ratings_html(candidate.safety_ratings)
-                if reasoning_text:
-                    reasoning_text += safety_html
-                else:
-                    normal_text += safety_html
-
-            if reasoning_text: delta_payload['reasoning_content'] = reasoning_text
-            if normal_text: 
-                delta_payload['content'] = normal_text
-            elif not reasoning_text and not delta_payload.get("tool_calls") and openai_finish_reason is None:
-                delta_payload['content'] = ""
-    
-    if not delta_payload and openai_finish_reason is None:
-        delta_payload['content'] = ""
-
-    chunk_data = {
-        "id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model_name,
-        "choices": [{"index": candidate_index, "delta": delta_payload, "finish_reason": openai_finish_reason}]
-    }
-    return f"data: {json.dumps(chunk_data)}\n\n"
-
-def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -> str:
-    choices = [{"index": i, "delta": {}, "finish_reason": "stop"} for i in range(candidate_count)]
-    final_chunk_data = {"id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model, "choices": choices}
-    return f"data: {json.dumps(final_chunk_data)}\n\n"

@@ -15,7 +15,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from models import OpenAIRequest, OpenAIMessage
 from message_processing import (
     convert_to_openai_format,
-    convert_chunk_to_openai,
     extract_reasoning_by_tags,
     _create_safety_ratings_html
 )
@@ -180,7 +179,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         config["system_instruction"] = "\n".join(system_texts)
     
     if request.temperature is not None: config["temperature"] = request.temperature
-    # 兼容新版大模型客户端的 max_completion_tokens
     if request.max_tokens is not None: 
         config["max_output_tokens"] = request.max_tokens
     elif getattr(request, "max_completion_tokens", None) is not None:
@@ -192,19 +190,12 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if request.seed is not None: config["seed"] = request.seed
     if request.n is not None: config["candidate_count"] = request.n
     
-    # 补全原生参数中的惩罚项映射
-    if getattr(request, "presence_penalty", None) is not None: 
-        config["presence_penalty"] = request.presence_penalty
-    if getattr(request, "frequency_penalty", None) is not None: 
-        config["frequency_penalty"] = request.frequency_penalty
+    if getattr(request, "presence_penalty", None) is not None: config["presence_penalty"] = request.presence_penalty
+    if getattr(request, "frequency_penalty", None) is not None: config["frequency_penalty"] = request.frequency_penalty
         
-    # 补全对 logprobs 的底层解析
-    if getattr(request, "response_logprobs", None) is not None: 
-        config["response_logprobs"] = request.response_logprobs
-    if getattr(request, "logprobs", None) is not None: 
-        config["logprobs"] = request.logprobs
+    if getattr(request, "response_logprobs", None) is not None: config["response_logprobs"] = request.response_logprobs
+    if getattr(request, "logprobs", None) is not None: config["logprobs"] = request.logprobs
 
-    # 兼容 JSON 化输出指令
     if getattr(request, "response_format", None) is not None:
         fmt = request.response_format
         fmt_type = fmt.get("type", "") if isinstance(fmt, dict) else getattr(fmt, "type", "")
@@ -219,7 +210,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
             types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold=safety_threshold, method=safety_method),
             types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold=safety_threshold, method=safety_method),
             types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold=safety_threshold, method=safety_method),
-            # 【重要补全】：关闭政治与公民选举过滤拦截
             types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY", threshold=safety_threshold, method=safety_method),
             types.SafetySetting(category="HARM_CATEGORY_IMAGE_HATE", threshold=safety_threshold, method=safety_method),
             types.SafetySetting(category="HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT", threshold=safety_threshold, method=safety_method),
@@ -251,7 +241,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         if function_declarations:
             tools_list.append({"function_declarations": function_declarations})
 
-    # =============== 🎨 生图专属官方配置 (4K / 动态比例 / 原生联网) ===============
     is_image_model = "image" in request.model.lower()
     
     if is_image_model:
@@ -282,7 +271,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         )
         tools_list.append({"google_search": {}})
 
-        # 【同步清理】：生图不支持新增的任何文本属性，一并剥离防止 400 崩溃
         unsupported_keys = [
             "temperature", "top_p", "top_k", "stop_sequences", "seed", 
             "candidate_count", "presence_penalty", "frequency_penalty", 
@@ -290,7 +278,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         ]
         for key in unsupported_keys:
             config.pop(key, None)
-    # ==============================================================================
 
     if tools_list:
         config["tools"] = tools_list
@@ -329,6 +316,88 @@ def is_gemini_response_valid(response: Any) -> bool:
                     if hasattr(part, 'function_call'): return True 
                     if hasattr(part, 'text') and isinstance(getattr(part, 'text', None), str) and getattr(part, 'text', '').strip(): return True
     return False
+
+
+def convert_chunk_to_openai(chunk: Any, model_name: str, response_id: str, candidate_index: int = 0) -> str:
+    from message_processing import parse_gemini_response_for_reasoning_and_content
+    delta_payload = {}
+    openai_finish_reason = None
+
+    if hasattr(chunk, 'candidates') and chunk.candidates:
+        candidate = chunk.candidates[0] 
+        raw_gemini_finish_reason = getattr(candidate, 'finish_reason', None)
+        if raw_gemini_finish_reason:
+            if hasattr(raw_gemini_finish_reason, 'name'): raw_gemini_finish_reason_str = raw_gemini_finish_reason.name.upper()
+            else: raw_gemini_finish_reason_str = str(raw_gemini_finish_reason).upper()
+
+            if raw_gemini_finish_reason_str == "STOP": openai_finish_reason = "stop"
+            elif raw_gemini_finish_reason_str == "MAX_TOKENS": openai_finish_reason = "length"
+            elif raw_gemini_finish_reason_str == "SAFETY": openai_finish_reason = "content_filter"
+            elif raw_gemini_finish_reason_str in ["TOOL_CODE", "FUNCTION_CALL"]: openai_finish_reason = "tool_calls"
+
+        function_call_detected_in_chunk = False
+        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts') and candidate.content.parts:
+            for part in candidate.content.parts:
+                if hasattr(part, 'function_call') and part.function_call is not None: 
+                    fc = part.function_call
+                    
+                    # 【防 400 核心修复】提取流式传输中的原生 thought_signature
+                    real_id = getattr(fc, 'id', None)
+                    if not real_id: real_id = getattr(fc, 'thought_signature', None)
+                    
+                    if real_id:
+                        tool_call_id = real_id
+                    else:
+                        tool_call_id = f"call_{response_id}_{candidate_index}_{fc.name.replace(' ', '_')}_{int(time.time()*10000 + random.randint(0,9999))}"
+                    
+                    current_tool_call_delta = {
+                        "index": 0, 
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": fc.name}
+                    }
+                    if fc.args is not None: 
+                        current_tool_call_delta["function"]["arguments"] = json.dumps(fc.args)
+                    else: 
+                        current_tool_call_delta["function"]["arguments"] = "" 
+
+                    if "tool_calls" not in delta_payload:
+                        delta_payload["tool_calls"] = []
+                    delta_payload["tool_calls"].append(current_tool_call_delta)
+                    
+                    delta_payload["content"] = None 
+                    function_call_detected_in_chunk = True
+                    break 
+
+        if not function_call_detected_in_chunk:
+            reasoning_text, normal_text = parse_gemini_response_for_reasoning_and_content(candidate)
+
+            if app_config.SAFETY_SCORE and hasattr(candidate, 'safety_ratings') and candidate.safety_ratings:
+                safety_html = _create_safety_ratings_html(candidate.safety_ratings)
+                if reasoning_text:
+                    reasoning_text += safety_html
+                else:
+                    normal_text += safety_html
+
+            if reasoning_text: delta_payload['reasoning_content'] = reasoning_text
+            if normal_text: 
+                delta_payload['content'] = normal_text
+            elif not reasoning_text and not delta_payload.get("tool_calls") and openai_finish_reason is None:
+                delta_payload['content'] = ""
+    
+    if not delta_payload and openai_finish_reason is None:
+        delta_payload['content'] = ""
+
+    chunk_data = {
+        "id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model_name,
+        "choices": [{"index": candidate_index, "delta": delta_payload, "finish_reason": openai_finish_reason}]
+    }
+    return f"data: {json.dumps(chunk_data)}\n\n"
+
+def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -> str:
+    choices = [{"index": i, "delta": {}, "finish_reason": "stop"} for i in range(candidate_count)]
+    final_chunk_data = {"id": response_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model, "choices": choices}
+    return f"data: {json.dumps(final_chunk_data)}\n\n"
 
 async def _chunk_openai_response_dict_for_sse(
     openai_response_dict: Dict[str, Any],
