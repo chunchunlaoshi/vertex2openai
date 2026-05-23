@@ -243,7 +243,9 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     if is_image_model:
         config["response_modalities"] = ["TEXT", "IMAGE"]
         
-        target_ar = "1:1"
+        # 默认不指定比例，开启 API 原生智能自动决策机制
+        target_ar = None
+        
         req_dict = request.model_dump()
         size_param = req_dict.get("size")
         if size_param:
@@ -257,15 +259,36 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
                 content = ""
                 if isinstance(msg.content, str): content = msg.content
                 elif isinstance(msg.content, list): content = " ".join([p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"])
-                ar_match = re.search(r"(?i)(?:--ar\s+)?(1[:：]1|16[:：]9|9[:：]16|3[:：]4|4[:：]3|21[:：]9|9[:：]21|4[:：]5|5[:：]4|3[:：]2|2[:：]3)", content)
+                
+                # 【比例精准过滤重构】：优先匹配标准生图 --ar，其次匹配独立比例，防非比例数字干扰
+                ar_match = re.search(r"(?i)--ar\s*(\d+[:：]\d+)", content)
+                if not ar_match:
+                    ar_match = re.search(r"\b(\d+[:：]\d+)\b", content)
+                    
                 if ar_match:
-                    target_ar = ar_match.group(1).replace("：", ":")
+                    parsed_ar = ar_match.group(1).replace("：", ":")
+                    
+                    # 定义生图模型的比例安全白名单
+                    pro_supported = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}
+                    flash_supported = pro_supported | {"1:4", "4:1", "1:8", "8:1"}
+                    
+                    is_flash_img = "3.1-flash" in request.model.lower()
+                    allowed_set = flash_supported if is_flash_img else pro_supported
+                    
+                    if parsed_ar in allowed_set:
+                        target_ar = parsed_ar
+                    else:
+                        # 触发白名单安全保护，不在白名单则不强传，直接交给大模型决策，彻底免疫 400 崩溃
+                        print(f"WARNING: Model {request.model} does not support '{parsed_ar}'. Auto-decide triggered.")
+                        target_ar = None
                 break
                 
-        config["image_config"] = types.ImageConfig(
-            aspect_ratio=target_ar,
-            image_size="4K"
-        )
+        # 封装 image_config 结构，强制 4K 级别分辨率
+        image_config_args = {"image_size": "4K"}
+        if target_ar:
+            image_config_args["aspect_ratio"] = target_ar
+            
+        config["image_config"] = types.ImageConfig(**image_config_args)
         tools_list.append({"google_search": {}})
 
         unsupported_keys = [
@@ -467,8 +490,9 @@ async def _chunk_openai_response_dict_for_sse(
 
             content_to_chunk = actual_content if actual_content is not None else ""
             if actual_content is not None:
+                # --- 生图护盾：拦截 Base64 图片，采用 128KB 黄金分片流式发送，根治 ClientPayloadError ---
                 if "![Image](data:image/" in content_to_chunk:
-                    chunk_size = len(content_to_chunk) 
+                    chunk_size = 131072
                 else:
                     chunk_size = max(1, math.ceil(len(content_to_chunk) / 10)) if content_to_chunk else 1
 
@@ -622,7 +646,7 @@ async def openai_fake_stream_generator(
         raise
     except Exception as e_outer: 
         err_msg_detail = f"Error in openai_fake_stream_generator (model: '{request_obj.model}'): {type(e_outer).__name__} - {str(e_outer)}"
-        print(f"ERROR: {err_msg_detail}")
+        print(f"ERROR: {img_url_data.get('url', '') if isinstance(img_url_data, dict) else ''}")
         sse_err_msg_display = str(e_outer)
         if len(sse_err_msg_display) > 512: sse_err_msg_display = sse_err_msg_display[:512] + "..."
         err_resp_sse = create_openai_error_response(500, sse_err_msg_display, "server_error")
@@ -706,7 +730,7 @@ async def execute_gemini_call(
                         err_msg_detail_stream = f"Streaming Error (Gemini API, model string: '{model_to_call}'): {type(e_stream_call).__name__} - {str(e_stream_call)}"
                         print(f"ERROR: {err_msg_detail_stream}")
                         s_err = str(e_stream_call); s_err = s_err[:1024]+"..." if len(s_err)>1024 else s_err
-                        err_resp = create_openai_error_response(500,s_err,"server_error")
+                        err_resp = create_openai_error_response(500, s_err, "server_error")
                         j_err = json.dumps(err_resp)
                         if not is_auto_attempt: 
                             yield f"data: {j_err}\n\n"
