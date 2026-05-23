@@ -11,6 +11,55 @@ import config as app_config
 from google.genai import types
 from models import OpenAIMessage, ContentPartText, ContentPartImage
 
+import io
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+def optimize_image_bytes(image_data: bytes, original_mime: str, max_size_bytes: int = 2 * 1024 * 1024) -> Tuple[bytes, str]:
+    """智能图片压缩：仅当图片超过 2MB 时，适度压缩到 2MB 以内，兼顾性能与画质"""
+    if Image is None:
+        return image_data, original_mime
+    
+    # 只要在 2MB 以内，坚决不进行破坏性压缩，原样发送
+    if len(image_data) <= max_size_bytes:
+        return image_data, original_mime
+        
+    try:
+        with Image.open(io.BytesIO(image_data)) as img:
+            # 转为 RGB 格式以防 RGBA 转 JPEG 报错
+            if img.mode in ('RGBA', 'LA', 'P'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'RGBA' or img.mode == 'LA':
+                    background.paste(img, mask=img.split()[-1])
+                else:
+                    background.paste(img)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # 如果分辨率极大（如超过 2048），进行长宽等比限制，否则保留原分辨率
+            max_dim = 2048
+            if img.width > max_dim or img.height > max_dim:
+                img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+            
+            output = io.BytesIO()
+            # 质量设为 90，保证高清晰度
+            img.save(output, format='JPEG', quality=90, optimize=True)
+            opt_data = output.getvalue()
+            
+            # 如果体积还是大于 2MB，再稍微降一点质量
+            if len(opt_data) > max_size_bytes:
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=80, optimize=True)
+                opt_data = output.getvalue()
+                
+            return opt_data, "image/jpeg"
+    except Exception as e:
+        print(f"警告: 输入图片压缩预处理失败，已安全回退为原图传输: {e}")
+        return image_data, original_mime
+
 SUPPORTED_ROLES = ["user", "model", "function"] 
 
 def extract_reasoning_by_tags(full_text: str, tag_name: str) -> Tuple[str, str]:
@@ -27,7 +76,6 @@ def extract_reasoning_by_tags(full_text: str, tag_name: str) -> Tuple[str, str]:
 def _extract_markdown_images_to_parts(text: str) -> Tuple[List[types.Part], str]:
     parts = []
     remaining_text = text
-    # 修复语法截断隐患：改用双引号包裹原生字符串
     pattern = r"!\[[^\]]*\]\(data:(image/[a-zA-Z0-9+.-]+);base64,([a-zA-Z0-9+/=]+)\)"
     matches = list(re.finditer(pattern, text))
     
@@ -38,8 +86,9 @@ def _extract_markdown_images_to_parts(text: str) -> Tuple[List[types.Part], str]
             if not mime_type.startswith("image/"):
                 continue
             try:
-                image_bytes = base64.b64decode(b64_data)
-                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+                raw_bytes = base64.b64decode(b64_data)
+                opt_bytes, opt_mime = optimize_image_bytes(raw_bytes, mime_type)
+                parts.append(types.Part.from_bytes(data=opt_bytes, mime_type=opt_mime))
                 start, end = match.span()
                 remaining_text = remaining_text[:start] + remaining_text[end:]
             except Exception as e:
@@ -187,7 +236,9 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
                                     mime_match = re.match(r"data:([^;]+);base64,(.+)", image_url)
                                     if mime_match:
                                         mime_type, b64_data = mime_match.groups()
-                                        parts.append(types.Part.from_bytes(data=base64.b64decode(b64_data), mime_type=mime_type))
+                                        raw_bytes = base64.b64decode(b64_data)
+                                        opt_bytes, opt_mime = optimize_image_bytes(raw_bytes, mime_type)
+                                        parts.append(types.Part.from_bytes(data=opt_bytes, mime_type=opt_mime))
                                 elif image_url.startswith("http"):
                                     try:
                                         def fetch_img():
@@ -203,7 +254,8 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
                                         with concurrent.futures.ThreadPoolExecutor() as pool:
                                             future = pool.submit(fetch_img)
                                             img_bytes, mime_type = future.result(timeout=12) 
-                                            parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+                                            opt_bytes, opt_mime = optimize_image_bytes(img_bytes, mime_type)
+                                            parts.append(types.Part.from_bytes(data=opt_bytes, mime_type=opt_mime))
                                     except Exception as e:
                                         print(f"Warning: Failed to fetch remote image {image_url}: {e}")
                             else:
@@ -220,7 +272,9 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
                                 mime_match = re.match(r"data:([^;]+);base64,(.+)", url_str)
                                 if mime_match:
                                     mime_type, b64_data = mime_match.groups()
-                                    parts.append(types.Part.from_bytes(data=base64.b64decode(b64_data), mime_type=mime_type))
+                                    raw_bytes = base64.b64decode(b64_data)
+                                    opt_bytes, opt_mime = optimize_image_bytes(raw_bytes, mime_type)
+                                    parts.append(types.Part.from_bytes(data=opt_bytes, mime_type=opt_mime))
                             elif url_str.startswith("http"):
                                 try:
                                     def fetch_img():
@@ -236,7 +290,8 @@ def create_gemini_prompt(messages: List[OpenAIMessage]) -> List[types.Content]:
                                     with concurrent.futures.ThreadPoolExecutor() as pool:
                                         future = pool.submit(fetch_img)
                                         img_bytes, mime_type = future.result(timeout=12) 
-                                        parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+                                        opt_bytes, opt_mime = optimize_image_bytes(img_bytes, mime_type)
+                                        parts.append(types.Part.from_bytes(data=opt_bytes, mime_type=opt_mime))
                                 except Exception as e:
                                     print(f"Warning: Failed to fetch remote image {url_str}: {e}")
                         else:
@@ -383,7 +438,6 @@ def process_gemini_response_to_openai_dict(gemini_response_obj: Any, request_mod
                             elif isinstance(thought_sig, str):
                                 thought_sig_b64 = thought_sig
 
-                        # 修复语法截断隐患：拆分变量，绝不使用超长 f-string
                         safe_name = fc.name.replace(" ", "_")
                         rand_num = int(time.time() * 10000 + random.randint(0, 9999))
 

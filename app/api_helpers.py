@@ -8,7 +8,7 @@ import random
 import base64
 from typing import List, Dict, Any, Callable, Union, Optional
 
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from google.auth.transport.requests import Request as AuthRequest
 from google.genai import types
 from openai import AsyncOpenAI 
@@ -204,7 +204,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         if fmt_type == "json_object":
             config["response_mime_type"] = "application/json"
     
-    # 官方 2026 最新基准配置
     safety_threshold = "BLOCK_NONE"
     
     config["safety_settings"] = [
@@ -242,8 +241,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
     
     if is_image_model:
         config["response_modalities"] = ["TEXT", "IMAGE"]
-        
-        # 默认不指定比例，开启 API 原生智能自动决策机制
         target_ar = None
         
         req_dict = request.model_dump()
@@ -260,18 +257,14 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
                 if isinstance(msg.content, str): content = msg.content
                 elif isinstance(msg.content, list): content = " ".join([p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"])
                 
-                # 优先匹配标准生图 --ar，其次匹配独立比例，防非比例数字干扰
                 ar_match = re.search(r"(?i)--ar\s*(\d+[:：]\d+)", content)
                 if not ar_match:
                     ar_match = re.search(r"\b(\d+[:：]\d+)\b", content)
                     
                 if ar_match:
                     parsed_ar = ar_match.group(1).replace("：", ":")
-                    
-                    # 定义生图模型的比例安全白名单
                     pro_supported = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}
                     flash_supported = pro_supported | {"1:4", "4:1", "1:8", "8:1"}
-                    
                     is_flash_img = "3.1-flash" in request.model.lower()
                     allowed_set = flash_supported if is_flash_img else pro_supported
                     
@@ -282,7 +275,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
                         target_ar = None
                 break
                 
-        # 封装 image_config 结构，强制 4K 级别分辨率
         image_config_args = {"image_size": "4K"}
         if target_ar:
             image_config_args["aspect_ratio"] = target_ar
@@ -323,7 +315,6 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         
     return config
 
-
 def is_gemini_response_valid(response: Any) -> bool:
     if response is None: return False
     if hasattr(response, "text") and isinstance(response.text, str) and response.text.strip(): return True
@@ -335,7 +326,6 @@ def is_gemini_response_valid(response: Any) -> bool:
                     if hasattr(part, "function_call"): return True 
                     if hasattr(part, "text") and isinstance(getattr(part, "text", None), str) and getattr(part, "text", "").strip(): return True
     return False
-
 
 def convert_chunk_to_openai(chunk: Any, model_name: str, response_id: str, candidate_index: int = 0) -> str:
     from message_processing import parse_gemini_response_for_reasoning_and_content
@@ -488,7 +478,6 @@ async def _chunk_openai_response_dict_for_sse(
 
             content_to_chunk = actual_content if actual_content is not None else ""
             if actual_content is not None:
-                # 【回滚】：恢复原版图片传输方案（一次性全量发送），彻底拯救前端解析器不卡死
                 if "![Image](data:image/" in content_to_chunk:
                     chunk_size = max(1, len(content_to_chunk))
                 else:
@@ -666,12 +655,38 @@ async def execute_gemini_call(
     client_model_name_for_log = getattr(current_client, "model_name", "unknown_direct_client_object")
     print(f"INFO: execute_gemini_call for requested API model '{model_to_call}', using client object with internal name '{client_model_name_for_log}'. Original request model: '{request_obj.model}'")
     
+    # ================= 新增：图片输出链路终极优化 =================
+    is_image_request = "image" in request_obj.model.lower()
+    
+    if is_image_request:
+        print("INFO: 触发生图直返机制 —— 拦截请求，保持 4K 原图并直接返回二进制图片流！")
+        try:
+            response_obj_call = await execute_with_retry(
+                current_client.aio.models.generate_content,
+                model=model_to_call, 
+                contents=actual_prompt_for_call,
+                config=gen_config_dict
+            )
+            
+            if hasattr(response_obj_call, "candidates") and response_obj_call.candidates:
+                for cand in response_obj_call.candidates:
+                    if hasattr(cand, "content") and hasattr(cand.content, "parts"):
+                        for part in cand.content.parts:
+                            if hasattr(part, "inline_data") and part.inline_data:
+                                img_bytes = part.inline_data.data
+                                mime_type = getattr(part.inline_data, "mime_type", "image/png")
+                                if not mime_type: 
+                                    mime_type = "image/png"
+                                # 直接返回原生二进制！打破常规 JSON 结构
+                                return Response(content=img_bytes, media_type=mime_type)
+            
+            return JSONResponse(status_code=500, content=create_openai_error_response(500, "生图失败，未从模型返回中提取到有效的图片数据。", "server_error"))
+        except Exception as e:
+            return JSONResponse(status_code=500, content=create_openai_error_response(500, f"生图请求发生异常: {str(e)}", "server_error"))
+    # ==============================================================
+
     if request_obj.stream:
-        is_image_request = "image" in request_obj.model.lower()
-        
-        if app_config.FAKE_STREAMING_ENABLED or is_image_request:
-            if is_image_request:
-                 print("INFO: 触发生图保护机制 —— 已强制切换为假流式输出以避开 Google 报错限制！")
+        if app_config.FAKE_STREAMING_ENABLED:
             return StreamingResponse(
                 gemini_fake_stream_generator(
                     current_client, model_to_call, actual_prompt_for_call,
