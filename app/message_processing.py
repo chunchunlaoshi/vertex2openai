@@ -17,18 +17,18 @@ try:
 except ImportError:
     Image = None
 
-def optimize_image_bytes(image_data: bytes, original_mime: str, max_size_bytes: int = 2 * 1024 * 1024) -> Tuple[bytes, str]:
-    """智能图片压缩：仅当图片超过 2MB 时，适度压缩到 2MB 以内，兼顾性能与画质"""
+def optimize_image_bytes(image_data: bytes, original_mime: str, max_size_bytes: int = int(1.5 * 1024 * 1024)) -> Tuple[bytes, str]:
+    """激进且高画质的输入图片压缩方案：超过1.5MB的图强制限制边长至1536，防卡死防爆栈"""
     if Image is None:
         return image_data, original_mime
     
-    # 只要在 2MB 以内，坚决不进行破坏性压缩，原样发送
+    # 只要在 1.5MB 以内，直接放行不破坏画质
     if len(image_data) <= max_size_bytes:
         return image_data, original_mime
         
     try:
         with Image.open(io.BytesIO(image_data)) as img:
-            # 转为 RGB 格式以防 RGBA 转 JPEG 报错
+            # 抹平透明通道以防转码报错
             if img.mode in ('RGBA', 'LA', 'P'):
                 background = Image.new('RGB', img.size, (255, 255, 255))
                 if img.mode == 'RGBA' or img.mode == 'LA':
@@ -39,25 +39,25 @@ def optimize_image_bytes(image_data: bytes, original_mime: str, max_size_bytes: 
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # 如果分辨率极大（如超过 2048），进行长宽等比限制，否则保留原分辨率
-            max_dim = 2048
+            # 强势降维：大模型识别语义 1536px 绰绰有余，强行卡死最大边长
+            max_dim = 1536
             if img.width > max_dim or img.height > max_dim:
                 img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
             
             output = io.BytesIO()
-            # 质量设为 90，保证高清晰度
-            img.save(output, format='JPEG', quality=90, optimize=True)
+            # 首选 85 高画质
+            img.save(output, format='JPEG', quality=85, optimize=True)
             opt_data = output.getvalue()
             
-            # 如果体积还是大于 2MB，再稍微降一点质量
+            # 若依然是超重，执行无情地二次压缩（通常 1536px 在 70 质量下很少超过 500KB）
             if len(opt_data) > max_size_bytes:
                 output = io.BytesIO()
-                img.save(output, format='JPEG', quality=80, optimize=True)
+                img.save(output, format='JPEG', quality=70, optimize=True)
                 opt_data = output.getvalue()
                 
             return opt_data, "image/jpeg"
     except Exception as e:
-        print(f"警告: 输入图片压缩预处理失败，已安全回退为原图传输: {e}")
+        print(f"警告: 输入图片极致压缩失败，已回退为原图传输: {e}")
         return image_data, original_mime
 
 SUPPORTED_ROLES = ["user", "model", "function"] 
