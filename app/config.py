@@ -1,13 +1,9 @@
-import os
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class AppSettings(BaseSettings):
     API_KEY: str = "123456"
-    HUGGINGFACE: bool = False
-    HUGGINGFACE_API_KEY: str = ""
-    CREDENTIALS_DIR: str = "/app/credentials"
-    GOOGLE_CREDENTIALS_JSON: Optional[str] = None
     VERTEX_EXPRESS_API_KEY: Optional[str] = None
     FAKE_STREAMING: bool = False
     FAKE_STREAMING_INTERVAL: float = 1.0
@@ -19,17 +15,14 @@ class AppSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+
 _settings = AppSettings()
 
 API_KEY = _settings.API_KEY
-HUGGINGFACE = _settings.HUGGINGFACE
-HUGGINGFACE_API_KEY = _settings.HUGGINGFACE_API_KEY
-CREDENTIALS_DIR = _settings.CREDENTIALS_DIR
-GOOGLE_CREDENTIALS_JSON_STR = _settings.GOOGLE_CREDENTIALS_JSON
 
 raw_vertex_keys = _settings.VERTEX_EXPRESS_API_KEY
 if raw_vertex_keys:
-    VERTEX_EXPRESS_API_KEY_VAL = [key.strip() for key in raw_vertex_keys.split(',') if key.strip()]
+    VERTEX_EXPRESS_API_KEY_VAL = [key.strip() for key in raw_vertex_keys.split(",") if key.strip()]
 else:
     VERTEX_EXPRESS_API_KEY_VAL = []
 
