@@ -5,7 +5,6 @@ from models import OpenAIRequest
 from message_processing import create_gemini_prompt
 
 def serialize_pydantic(obj: Any) -> Any:
-    """递归将 google-genai 的 Pydantic 模型序列化为基础 JSON 类型"""
     if isinstance(obj, BaseModel):
         return obj.model_dump(mode="json")
     elif isinstance(obj, dict):
@@ -39,7 +38,6 @@ KEY_MAP = {
 }
 
 def convert_keys_to_camel(obj: Any) -> Any:
-    """将参数字典中的所有 snake_case 键转换为 camelCase 驼峰命名"""
     if isinstance(obj, dict):
         new_dict = {}
         for k, v in obj.items():
@@ -52,53 +50,67 @@ def convert_keys_to_camel(obj: Any) -> Any:
 
 def build_studio_graphql_payload(model_name: str, request: OpenAIRequest, gen_config_dict: dict, auth_bundle: dict) -> dict:
     """
-    【100% 真实伪装克隆】
-    直接深拷贝油猴脚本抓取到的原生 Payload，绝不破坏谷歌内部的实验标志和安全校验层级。
-    仅覆盖对话数据和用户指定的配置。
+    【双模克隆载荷生成器】
+    完美兼容区域化 REST 接口 (streamGenerateContent) 和旧版 GraphQL (batchGraphql)
     """
-    # 1. 深度克隆抓取到的原生 Body，保留一切隐藏环境特征
     payload = copy.deepcopy(auth_bundle.get("body", {}))
     
-    if "variables" not in payload:
-        payload["variables"] = {}
-    variables = payload["variables"]
-    
-    # 2. 注入经过驼峰转换的聊天记录
+    # 编译 OpenAI 消息历史，并完成 Pydantic 转换
     raw_contents = create_gemini_prompt(request.messages)
     camel_contents = convert_keys_to_camel(serialize_pydantic(raw_contents))
-    variables["contents"] = camel_contents
-    
-    # 3. 动态拼接最新的模型名称（保留原有的 Project ID 前缀结构）
-    harvested_model = variables.get("model", "")
-    if harvested_model and "/" in harvested_model:
-        parts = harvested_model.split("/")
-        parts[-1] = model_name
-        variables["model"] = "/".join(parts)
-    else:
-        variables["model"] = model_name
+
+    # 1. 兼容模式 A：旧版 batchGraphql 格式 (含有 variables 节点)
+    if "variables" in payload:
+        variables = payload["variables"]
+        variables["contents"] = camel_contents
         
-    # 4. 覆盖请求的推理参数
-    if "generationConfig" not in variables:
-        variables["generationConfig"] = {}
-    gc = variables["generationConfig"]
-    
-    if request.temperature is not None: gc["temperature"] = request.temperature
-    if request.max_tokens is not None: gc["maxOutputTokens"] = request.max_tokens
-    if request.top_p is not None: gc["topP"] = request.top_p
-    if request.stop is not None: gc["stopSequences"] = request.stop
+        # 动态替换模型资源标识（自动保留 locations/us-central1 或 global 等区域指纹）
+        harvested_model = variables.get("model", "")
+        if harvested_model and "/" in harvested_model:
+            parts = harvested_model.split("/")
+            parts[-1] = model_name
+            variables["model"] = "/".join(parts)
+        else:
+            variables["model"] = model_name
+            
+        if "generationConfig" not in variables:
+            variables["generationConfig"] = {}
+        gc = variables["generationConfig"]
+        
+        if request.temperature is not None: gc["temperature"] = request.temperature
+        if request.max_tokens is not None: gc["maxOutputTokens"] = request.max_tokens
+        if request.top_p is not None: gc["topP"] = request.top_p
+        if request.stop is not None: gc["stopSequences"] = request.stop
 
-    # 注入思考模型参数
-    if "gemini-3" in model_name or "gemini-2.5" in model_name:
-        gc["thinkingConfig"] = {
-            "includeThoughts": True,
-            "thinkingLevel": "MEDIUM"
-        }
+        if "gemini-3" in model_name or "gemini-2.5" in model_name:
+            gc["thinkingConfig"] = {"includeThoughts": True, "thinkingLevel": "MEDIUM"}
+        else:
+            gc.pop("thinkingConfig", None)
+
+        system_texts = [m.content for m in request.messages if m.role == "system" and isinstance(m.content, str)]
+        if system_texts:
+            variables["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
+
+    # 2. 兼容模式 B：区域化标准的 streamGenerateContent REST 格式 (直接包含 contents)
     else:
-        gc.pop("thinkingConfig", None)
+        payload["contents"] = camel_contents
+        
+        if "generationConfig" not in payload:
+            payload["generationConfig"] = {}
+        gc = payload["generationConfig"]
+        
+        if request.temperature is not None: gc["temperature"] = request.temperature
+        if request.max_tokens is not None: gc["maxOutputTokens"] = request.max_tokens
+        if request.top_p is not None: gc["topP"] = request.top_p
+        if request.stop is not None: gc["stopSequences"] = request.stop
 
-    # 5. 注入系统指令
-    system_texts = [m.content for m in request.messages if m.role == "system" and isinstance(m.content, str)]
-    if system_texts:
-        variables["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
+        if "gemini-3" in model_name or "gemini-2.5" in model_name:
+            gc["thinkingConfig"] = {"includeThoughts": True, "thinkingLevel": "MEDIUM"}
+        else:
+            gc.pop("thinkingConfig", None)
+
+        system_texts = [m.content for m in request.messages if m.role == "system" and isinstance(m.content, str)]
+        if system_texts:
+            payload["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
         
     return payload
