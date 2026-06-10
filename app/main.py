@@ -17,38 +17,43 @@ from logger import rt_logger, stats
 import config
 from runtime_state import app_state
 
-from headless.browser import HeadlessBrowser
-from headless.harvester import CredentialHarvester
-from upstreams.headless_proxy import set_headless_browser
 from cookie_auth import validate_cookie
 
 express_key_manager = ExpressKeyManager()
 _global_browser = None
 
 async def run_headless_browser():
-    """后台运行无头浏览器"""
+    """后台运行无头浏览器（仅本地环境可选，云端请用 Cookie 直连模式）"""
     global _global_browser
+    try:
+        from headless.browser import HeadlessBrowser
+        from headless.harvester import CredentialHarvester
+    except ImportError:
+        print("⚠️ Playwright 未安装，无头浏览器不可用。请使用 Cookie 直连模式。")
+        return
+
     browser = HeadlessBrowser()
     _global_browser = browser
-    set_headless_browser(browser)
     
     harvester = CredentialHarvester(on_credentials=lambda creds: app_state.update_auth_bundle(creds))
     
     if not await browser.start(headless=config.HEADLESS_MODE):
-        print("❌ 无头浏览器启动失败，请检查 Playwright 安装和配置")
+        print("❌ 无头浏览器启动失败。请改用 Cookie 直连模式（在大盘中粘贴 Cookie + Project ID）。")
+        _global_browser = None
         return
         
     await browser.setup_request_interception(harvester.handle_request)
     
     if await browser.navigate_to_vertex():
-        # 获取初始凭证
         await browser.send_test_message()
         
-        # 开启定时刷新循环
         while browser.is_running:
             await asyncio.sleep(config.CREDENTIAL_REFRESH_INTERVAL)
             if browser.is_running:
-                await browser.send_test_message()
+                try:
+                    await browser.send_test_message()
+                except Exception as e:
+                    print(f"⚠️ 定时刷新异常: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -309,7 +314,7 @@ DASHBOARD_HTML = """
 
     <script>
         let chartInstance = null;
-        let screenshotInterval = null;
+
 
         function formatNumber(num) { return num.toLocaleString('en-US'); }
 
@@ -447,76 +452,6 @@ DASHBOARD_HTML = """
             } catch(e) {
                 alert("❌ 网络请求失败");
             }
-        }
-
-        async function refreshCredentials() {
-
-        document.getElementById('remote-screenshot').addEventListener('click', async function(e) {
-            const rect = this.getBoundingClientRect();
-            // 假设 Playwright viewport 是 1920x1080
-            const imgWidth = 1920;
-            const imgHeight = 1080;
-            
-            const containerRatio = rect.width / rect.height;
-            const imageRatio = imgWidth / imgHeight;
-            
-            let drawWidth, drawHeight, offsetX, offsetY;
-            
-            if (containerRatio > imageRatio) {
-                drawHeight = rect.height;
-                drawWidth = rect.height * imageRatio;
-                offsetX = (rect.width - drawWidth) / 2;
-                offsetY = 0;
-            } else {
-                drawWidth = rect.width;
-                drawHeight = rect.width / imageRatio;
-                offsetX = 0;
-                offsetY = (rect.height - drawHeight) / 2;
-            }
-            
-            const clickX = e.clientX - rect.left - offsetX;
-            const clickY = e.clientY - rect.top - offsetY;
-            
-            if (clickX < 0 || clickX > drawWidth || clickY < 0 || clickY > drawHeight) return;
-            
-            const finalX = (clickX / drawWidth) * imgWidth;
-            const finalY = (clickY / drawHeight) * imgHeight;
-            
-            await fetch('/api/headless/interact', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'click', x: finalX, y: finalY })
-            });
-            
-            setTimeout(() => {
-                this.src = '/api/headless/screenshot?t=' + new Date().getTime();
-            }, 300);
-        });
-
-        async function sendRemoteText() {
-            const input = document.getElementById('remote-text-input');
-            const text = input.value;
-            if(!text) return;
-            await fetch('/api/headless/interact', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'type', text: text })
-            });
-            input.value = '';
-            setTimeout(() => {
-                document.getElementById('remote-screenshot').src = '/api/headless/screenshot?t=' + new Date().getTime();
-            }, 500);
-        }
-        
-        async function sendRemoteKey(key) {
-            await fetch('/api/headless/interact', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'key', key: key })
-            });
-            setTimeout(() => {
-                document.getElementById('remote-screenshot').src = '/api/headless/screenshot?t=' + new Date().getTime();
-            }, 500);
         }
 
         async function refreshCredentials() {
@@ -669,36 +604,7 @@ async def set_google_cookie(setting: CookieSetting, username: str = Depends(veri
     
     return JSONResponse(content={"status": "success", "message": validation["message"]})
 
-# ========== 远程可视化交互 API ==========
 
-class RemoteInteraction(BaseModel):
-    action: str
-    x: float = 0
-    y: float = 0
-    text: str = ""
-    key: str = ""
-
-@app.get("/api/headless/screenshot")
-async def get_headless_screenshot(username: str = Depends(verify_auth)):
-    global _global_browser
-    if _global_browser and _global_browser.is_running:
-        img_bytes = await _global_browser.get_screenshot()
-        if img_bytes:
-            return Response(content=img_bytes, media_type="image/jpeg")
-    return Response(status_code=404)
-
-@app.post("/api/headless/interact")
-async def headless_interact(interaction: RemoteInteraction, username: str = Depends(verify_auth)):
-    global _global_browser
-    if _global_browser and _global_browser.is_running:
-        if interaction.action == "click":
-            await _global_browser.send_click(interaction.x, interaction.y)
-        elif interaction.action == "type":
-            await _global_browser.send_text(interaction.text)
-        elif interaction.action == "key":
-            await _global_browser.send_key(interaction.key)
-        return JSONResponse(content={"status": "success"})
-    return JSONResponse(status_code=503, content={"error": "Not running"})
 
 @app.get("/stream-logs")
 async def stream_logs_endpoint(request: Request, username: str = Depends(verify_auth)):
