@@ -20,6 +20,7 @@ from runtime_state import app_state
 from headless.browser import HeadlessBrowser
 from headless.harvester import CredentialHarvester
 from upstreams.headless_proxy import set_headless_browser
+from cookie_auth import validate_cookie
 
 express_key_manager = ExpressKeyManager()
 _global_browser = None
@@ -232,35 +233,29 @@ DASHBOARD_HTML = """
                                 <span class="text-xs text-slate-400 font-medium">系统自动维护会话活性</span>
                             </div>
 
-                            <!-- 远程登录可视化终端 -->
-                            <div id="remote-login-console" class="hidden p-3 bg-rose-50 rounded-xl border border-rose-200 mt-2">
-                                <div class="flex items-center justify-between mb-2">
-                                    <span class="text-xs font-bold text-rose-700">⚠️ 需要验证或登录账号 (云端免 VNC 直连)</span>
-                                    <span class="text-[10px] text-rose-500 font-medium">请在下方实时画面中点击/输入操作</span>
+                            <div id="cookie-direct-config" class="p-3 bg-blue-50/50 rounded-xl border border-blue-200 mt-2 space-y-3">
+                                <div>
+                                    <label class="text-xs font-bold text-slate-700 mb-1 flex items-center gap-1">
+                                        🚀 API 直连 Cookie <span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">免浏览器</span>
+                                    </label>
+                                    <textarea id="google-cookie-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" rows="2" placeholder="在此粘贴从 console.cloud.google.com 获取的完整 Cookie..."></textarea>
                                 </div>
-                                <div class="relative w-full overflow-hidden rounded shadow-sm border border-rose-200 bg-black" style="aspect-ratio: 16/9;">
-                                    <img id="remote-screenshot" class="w-full h-full object-contain cursor-crosshair" src="" alt="Browser Screen">
+                                <div>
+                                    <label class="text-xs font-bold text-slate-700 mb-1 block">
+                                        Google Cloud Project ID
+                                    </label>
+                                    <input type="text" id="google-project-id-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" placeholder="例如: gen-lang-client-xxxx">
                                 </div>
-                                <div class="flex gap-2 mt-2">
-                                    <input type="text" id="remote-text-input" class="flex-1 text-xs p-1.5 border border-rose-300 rounded focus:outline-none focus:ring-1 focus:ring-rose-500" placeholder="输入文本 (如邮箱/密码)">
-                                    <button onclick="sendRemoteText()" class="bg-rose-600 hover:bg-rose-700 text-white text-[11px] px-3 rounded shadow-sm font-medium">发送文本</button>
-                                    <button onclick="sendRemoteKey('Enter')" class="bg-slate-600 hover:bg-slate-700 text-white text-[11px] px-3 rounded shadow-sm font-medium">回车</button>
-                                </div>
-                                <div class="text-[10px] text-rose-500 mt-2">提示：由于是实时截图流，直接用手指点击上方图片即可模拟鼠标点击按钮或输入框。</div>
-                            </div>
-
-                            <div class="p-3 bg-slate-50 rounded-xl border border-slate-200 mt-2">
-                                <label class="text-xs font-bold text-slate-700 mb-2 block">手工粘贴 Cookie 注入通道 (可选)</label>
-                                <textarea id="google-cookie-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" rows="2" placeholder="填写您的 __Secure-1PSID 等 Cookie 完整字符串，保存后可跳过上方交互界面"></textarea>
-                                <div class="flex justify-end mt-2">
-                                    <button onclick="saveGoogleCookie()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-1.5 rounded-lg transition-all shadow-sm">保存 Cookie 并应用</button>
+                                <div class="flex justify-between items-center mt-2">
+                                    <div class="text-[10px] text-slate-500">保存后自动验证是否包含 SAPISID</div>
+                                    <button onclick="saveGoogleCookie()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-1.5 rounded-lg transition-all shadow-sm">保存直连配置</button>
                                 </div>
                             </div>
                         </div>
                         <div class="text-[11px] text-slate-600 mt-3 p-3 bg-blue-50/70 rounded-xl border border-blue-100/70 leading-relaxed shadow-sm">
-                            💡 <span class="font-bold text-blue-700">全平台通用的无头方案：</span><br>
-                            现在，无论您在 Render 云端还是本地电脑，只要开启 <code>HEADLESS_MODE=True</code>，若遇到需要登录的情况，控制台会<b>自动呈现“远程云桌面实时交互界面”</b>。<br>
-                            您可以在手机或电脑上，<b>直接点击图片里的按钮，或在下方输入框输入账号密码</b>，完成登录后界面会自动消失并静默代理！
+                            💡 <span class="font-bold text-blue-700">全新直连方案（告别崩溃卡死）：</span><br>
+                            系统现已支持 <b>SAPISIDHASH 原生算法直连</b>，无需启动任何无头浏览器（彻底解决 Render 环境闪退卡死问题）。<br>
+                            <b>如何获取：</b>打开 <code>console.cloud.google.com/vertex-ai</code>，按 F12 打开网络面板，复制任意请求头的 <code>cookie</code> 字符串，和 URL 中的 <code>project</code> 参数。
                         </div>
                     </div>
                 </div>
@@ -386,32 +381,11 @@ DASHBOARD_HTML = """
                         const ageText = document.getElementById('credential-age-text');
                         
                         if (statusData.is_running) {
-                            if (statusData.needs_login) {
-                                indicator.className = 'w-3 h-3 rounded-full bg-amber-500 animate-pulse';
-                                statusText.innerText = '🟡 等待远程交互登录';
-                                document.getElementById('remote-login-console').classList.remove('hidden');
-                                if(!screenshotInterval) {
-                                    screenshotInterval = setInterval(() => {
-                                        document.getElementById('remote-screenshot').src = '/api/headless/screenshot?t=' + new Date().getTime();
-                                    }, 1000);
-                                }
-                            } else {
-                                indicator.className = 'w-3 h-3 rounded-full bg-emerald-500';
-                                statusText.innerText = '🟢 运行中';
-                                document.getElementById('remote-login-console').classList.add('hidden');
-                                if(screenshotInterval) {
-                                    clearInterval(screenshotInterval);
-                                    screenshotInterval = null;
-                                }
-                            }
+                            indicator.className = 'w-3 h-3 rounded-full bg-emerald-500';
+                            statusText.innerText = '🟢 正在运行 (兼容模式)';
                         } else {
-                            indicator.className = 'w-3 h-3 rounded-full bg-rose-500';
-                            statusText.innerText = '🔴 已停止';
-                            document.getElementById('remote-login-console').classList.add('hidden');
-                            if(screenshotInterval) {
-                                clearInterval(screenshotInterval);
-                                screenshotInterval = null;
-                            }
+                            indicator.className = 'w-3 h-3 rounded-full bg-slate-400';
+                            statusText.innerText = '⚪ 未启动 (使用 Cookie 直连模式可忽略)';
                         }
                         
                         if (statusData.credential_age !== null && statusData.credential_age < 999999) {
@@ -452,28 +426,30 @@ DASHBOARD_HTML = """
 
         async function saveGoogleCookie() {
             const cookieStr = document.getElementById('google-cookie-input').value;
-            if(!cookieStr.trim()) {
-                alert("请输入 Cookie 字符串");
+            const projectId = document.getElementById('google-project-id-input').value;
+            if(!cookieStr.trim() || !projectId.trim()) {
+                alert("请输入完整的 Cookie 字符串和 Project ID");
                 return;
             }
             try {
                 const res = await fetch('/api/headless/cookie', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cookie: cookieStr })
+                    body: JSON.stringify({ cookie: cookieStr, project_id: projectId })
                 });
+                const data = await res.json();
                 if(res.ok) {
-                    alert("✅ Cookie 保存成功！无头浏览器将会重启以应用新 Cookie");
-                    setTimeout(fetchStats, 3000);
+                    alert(data.message || "✅ 保存成功！直连模式已启用。");
+                    setTimeout(fetchStats, 1000);
                 } else {
-                    alert("❌ 保存失败");
+                    alert("❌ " + (data.error || "保存失败"));
                 }
             } catch(e) {
                 alert("❌ 网络请求失败");
             }
         }
 
-        // ================= 远程可视化交互逻辑 =================
+        async function refreshCredentials() {
 
         document.getElementById('remote-screenshot').addEventListener('click', async function(e) {
             const rect = this.getBoundingClientRect();
@@ -564,6 +540,8 @@ DASHBOARD_HTML = """
                 } else {
                     document.querySelector('input[name="api_mode"][value="api_key"]').checked = true;
                 }
+                if (state.google_cookie) document.getElementById('google-cookie-input').value = state.google_cookie;
+                if (state.google_project_id) document.getElementById('google-project-id-input').value = state.google_project_id;
             } catch (e) {
                 console.error("获取运行状态失败", e);
             }
@@ -639,17 +617,21 @@ class ModeSetting(BaseModel):
 @app.get("/api/settings/runtime")
 async def get_runtime_settings(username: str = Depends(verify_auth)):
     return JSONResponse(content={
-        "use_web_proxy": app_state.is_web_proxy_enabled()
+        "use_web_proxy": app_state.is_web_proxy_enabled(),
+        "google_cookie": app_state.get_google_cookie(),
+        "google_project_id": app_state.get_project_id()
     })
 
 @app.post("/api/settings/mode")
 async def set_settings_mode(setting: ModeSetting, username: str = Depends(verify_auth)):
     app_state.enable_web_proxy(setting.mode == "web_proxy")
     
-    # 如果切换到 web_proxy 且浏览器未运行，尝试启动它
+    # 若有 cookie，无需强行启动无头浏览器，它会走直连模式
     global _global_browser
     if setting.mode == "web_proxy" and (not _global_browser or not _global_browser.is_running):
-        asyncio.create_task(run_headless_browser())
+        # 仅当没有 Cookie 时尝试启动备用的无头浏览器
+        if not app_state.get_google_cookie() and config.HEADLESS_MODE:
+            asyncio.create_task(run_headless_browser())
         
     return JSONResponse(content={"status": "success"})
 
@@ -657,7 +639,7 @@ async def set_settings_mode(setting: ModeSetting, username: str = Depends(verify
 async def get_headless_status(username: str = Depends(verify_auth)):
     global _global_browser
     is_running = _global_browser is not None and _global_browser.is_running
-    needs_login = _global_browser is not None and _global_browser.needs_manual_login
+    needs_login = False
     return JSONResponse(content={
         "is_running": is_running,
         "needs_login": needs_login,
@@ -670,22 +652,22 @@ async def trigger_headless_refresh(username: str = Depends(verify_auth)):
     if _global_browser and _global_browser.is_running:
         asyncio.create_task(_global_browser.send_test_message())
         return JSONResponse(content={"status": "success"})
-    return JSONResponse(status_code=503, content={"error": "无头浏览器未运行"})
+    return JSONResponse(status_code=503, content={"error": "无头浏览器未运行 (如果是直连模式则无需刷新)"})
 
 class CookieSetting(BaseModel):
     cookie: str
+    project_id: str
 
 @app.post("/api/headless/cookie")
 async def set_google_cookie(setting: CookieSetting, username: str = Depends(verify_auth)):
-    app_state.set_google_cookie(setting.cookie)
+    validation = validate_cookie(setting.cookie)
+    if not validation["valid"]:
+        return JSONResponse(status_code=400, content={"error": validation["message"]})
+        
+    app_state.set_google_cookie(setting.cookie.strip())
+    app_state.set_project_id(setting.project_id.strip())
     
-    # 强制重启无头浏览器以应用新 Cookie
-    global _global_browser
-    if _global_browser and _global_browser.is_running:
-        await _global_browser.close()
-    
-    asyncio.create_task(run_headless_browser())
-    return JSONResponse(content={"status": "success"})
+    return JSONResponse(content={"status": "success", "message": validation["message"]})
 
 # ========== 远程可视化交互 API ==========
 

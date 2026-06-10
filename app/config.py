@@ -13,10 +13,14 @@ class AppSettings(BaseSettings):
     PROXY_URL: Optional[str] = None
     SSL_CERT_FILE: Optional[str] = None
 
-    # 无头浏览器模式配置
-    HEADLESS_MODE: bool = True              # 是否无头模式（首次登录时设为 False 以显示浏览器窗口）
-    GOOGLE_COOKIE: Optional[str] = None     # 云端部署专用：直接填入浏览器抓取的 Cookie 字符串，免本地弹窗登录
-    CREDENTIAL_REFRESH_INTERVAL: int = 180  # 凭证自动刷新间隔（秒），默认3分钟
+    # Cookie 直连模式配置（推荐 Render 等云端部署使用）
+    GOOGLE_COOKIE: Optional[str] = None         # Google Cookie 字符串（从浏览器 DevTools 复制）
+    GOOGLE_PROJECT_ID: Optional[str] = None     # Google Cloud 项目 ID（从 Console URL 中获取）
+    GOOGLE_REGION: str = "us-central1"          # Vertex AI 区域，默认 us-central1
+
+    # 无头浏览器模式配置（仅本地部署可用）
+    HEADLESS_MODE: bool = True
+    CREDENTIAL_REFRESH_INTERVAL: int = 180
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -38,8 +42,11 @@ ROUNDROBIN = _settings.ROUNDROBIN
 SAFETY_SCORE = _settings.SAFETY_SCORE
 PROXY_URL = _settings.PROXY_URL
 SSL_CERT_FILE = _settings.SSL_CERT_FILE
-HEADLESS_MODE = _settings.HEADLESS_MODE
+
 GOOGLE_COOKIE = _settings.GOOGLE_COOKIE
+GOOGLE_PROJECT_ID = _settings.GOOGLE_PROJECT_ID
+GOOGLE_REGION = _settings.GOOGLE_REGION
+HEADLESS_MODE = _settings.HEADLESS_MODE
 CREDENTIAL_REFRESH_INTERVAL = _settings.CREDENTIAL_REFRESH_INTERVAL
 
 VERTEX_REASONING_TAG = "vertex_think_tag"
