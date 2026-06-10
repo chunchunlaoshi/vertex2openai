@@ -119,11 +119,6 @@ class HeadlessBrowser:
     async def navigate_to_vertex(self) -> bool:
         """
         导航到 Vertex AI Studio
-
-        检测是否需要登录:
-        - 如果重定向到 accounts.google.com，说明需要登录
-        - 有头模式: 等待用户手动登录 (最多5分钟)
-        - 无头模式: 打印错误提示
         """
         if not self.page:
             print("❌ 浏览器未启动")
@@ -132,19 +127,41 @@ class HeadlessBrowser:
         try:
             print("🔗 正在导航到 Vertex AI Studio...")
 
+            # 注入云端环境提供的 Cookie (如果有)
+            from config import GOOGLE_COOKIE
+            from runtime_state import app_state
+            
+            cookie_str = GOOGLE_COOKIE or app_state.get_google_cookie()
+            if cookie_str and self.context:
+                print("🍪 检测到预设 Google Cookie，尝试免登录注入...")
+                cookies = []
+                for pair in cookie_str.split(';'):
+                    if '=' in pair:
+                        k, v = pair.strip().split('=', 1)
+                        cookies.append({
+                            "name": k.strip(),
+                            "value": v.strip(),
+                            "domain": ".google.com",
+                            "path": "/"
+                        })
+                if cookies:
+                    await self.context.add_cookies(cookies)
+
             try:
                 await self.page.goto(self.VERTEX_AI_URL, wait_until="domcontentloaded", timeout=30000)
 
                 # 检查是否需要登录
                 current_url = self.page.url
                 if "accounts.google.com" in current_url:
+                    if cookie_str:
+                        print("⚠️ 预设的 Cookie 可能已失效，被重定向到登录页")
                     print("⚠️ 需要登录 Google 账号")
-                    print("   请在浏览器中完成登录，然后等待自动跳转...")
+                    print("   若在无头服务器(如 Render)上看到此提示，由于没有浏览器界面，您必须配置 GOOGLE_COOKIE 环境变量，或在控制面板粘贴 Cookie！")
                     try:
                         await self.page.wait_for_url("**/vertex-ai/**", timeout=300000)
                         print("✅ 登录成功")
                     except Exception:
-                        print("❌ 登录超时")
+                        print("❌ 登录超时 (云端纯无头模式下若未配置 Cookie 将无法通过此步)")
                         return False
 
                 # 等待页面进一步加载稳定
