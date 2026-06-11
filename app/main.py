@@ -273,7 +273,7 @@ DASHBOARD_HTML = """
                             </div>
                             <div class="text-[11px] text-slate-600 mb-2 leading-relaxed">
                                 <b>1. 添加书签：</b>复制下方代码，在浏览器任意页面添加书签，将书签网址(URL)替换为这段代码。<br>
-                                <b>2. 一键同步：</b>在手机打开 <code>console.cloud.google.com</code>（需登录），点开刚刚保存的书签，即可自动获取 Cookie 并同步到大盘！
+                                <b>2. 一键同步：</b>在手机打开 <code>console.cloud.google.com</code>，点击此书签，弹窗中点击按钮复制。然后回到此处，直接在 Cookie 框粘贴即可自动填充 Project ID！
                             </div>
                             <div class="relative">
                                 <textarea id="bookmarklet-code" class="w-full text-[10px] p-2 pr-8 border border-purple-200 rounded text-purple-800 bg-purple-50/50 font-mono break-all focus:outline-none" rows="3" readonly></textarea>
@@ -449,10 +449,53 @@ DASHBOARD_HTML = """
             if(mode === 'web_proxy') fetchStats(); // Refresh immediately
         }
 
+        function handleCookieInput(e) {
+            const val = e.target.value.trim();
+            if (val.includes('===VERTEX_SYNC===')) {
+                const lines = val.split('\n');
+                let parsedProject = '';
+                let parsedCookie = '';
+                for (let line of lines) {
+                    const l = line.trim();
+                    if (l.startsWith('PROJECT_ID:')) {
+                        parsedProject = l.substring('PROJECT_ID:'.length).trim();
+                    } else if (l.startsWith('COOKIE:')) {
+                        parsedCookie = l.substring('COOKIE:'.length).trim();
+                    }
+                }
+                if (parsedProject && parsedCookie) {
+                    document.getElementById('google-cookie-input').value = parsedCookie;
+                    document.getElementById('google-project-id-input').value = parsedProject;
+                    alert('🎉 成功识别并解析一键同步凭证！\\nProject ID: ' + parsedProject);
+                }
+            }
+        }
+
         async function saveGoogleCookie() {
-            const cookieStr = document.getElementById('google-cookie-input').value;
-            const projectId = document.getElementById('google-project-id-input').value;
-            if(!cookieStr.trim() || !projectId.trim()) {
+            let cookieStr = document.getElementById('google-cookie-input').value.trim();
+            let projectId = document.getElementById('google-project-id-input').value.trim();
+            
+            if (cookieStr.includes('===VERTEX_SYNC===')) {
+                const lines = cookieStr.split('\n');
+                let parsedProject = '';
+                let parsedCookie = '';
+                for (let line of lines) {
+                    const l = line.trim();
+                    if (l.startsWith('PROJECT_ID:')) {
+                        parsedProject = l.substring('PROJECT_ID:'.length).trim();
+                    } else if (l.startsWith('COOKIE:')) {
+                        parsedCookie = l.substring('COOKIE:'.length).trim();
+                    }
+                }
+                if (parsedProject && parsedCookie) {
+                    cookieStr = parsedCookie;
+                    projectId = parsedProject;
+                    document.getElementById('google-cookie-input').value = cookieStr;
+                    document.getElementById('google-project-id-input').value = projectId;
+                }
+            }
+
+            if(!cookieStr || !projectId) {
                 alert("请输入完整的 Cookie 字符串和 Project ID");
                 return;
             }
@@ -552,10 +595,11 @@ DASHBOARD_HTML = """
             loadRuntimeSettings();
             setInterval(fetchStats, 3000);
             initBookmarklet();
+            document.getElementById('google-cookie-input').addEventListener('input', handleCookieInput);
         }
 
         function initBookmarklet() {
-            const code = `javascript:(function(){var p=new URLSearchParams(window.location.search).get('project')||(window.location.href.match(/project=([^&]+)/)||[])[1];if(!p)p=prompt("未检测到 Project ID，请手动输入:");if(!p)return;var s=localStorage.getItem('v2o_url')||prompt("首次使用请输入反代接口地址\\n(如 ${window.location.origin}/api/headless/cookie):","${window.location.origin}/api/headless/cookie");if(!s)return;var url=s.endsWith('/api/headless/cookie')?s:s.replace(/\\/$/,'')+'/api/headless/cookie';localStorage.setItem('v2o_url',url);var k=localStorage.getItem('v2o_key')||prompt("请输入大盘的 API_KEY 密码:");if(!k)return;localStorage.setItem('v2o_key',k);fetch(url,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Basic '+btoa('admin:'+k)},body:JSON.stringify({cookie:document.cookie,project_id:p})}).then(r=>{if(r.status===401){localStorage.removeItem('v2o_key');throw new Error('密码错误(401)，请重试');}return r.json();}).then(d=>{if(d.status==='success')alert('✅ 成功同步最新 Cookie 到大盘！\\nProject: '+p);else alert('❌ 同步失败: '+(d.error||JSON.stringify(d)));}).catch(e=>{alert('❌ 发生错误: '+e.message);});})();`;
+            const code = `javascript:(function(){var p=new URLSearchParams(window.location.search).get('project')||(window.location.href.match(/project=([^&]+)/)||[])[1]||'';var c=document.cookie;var t='===VERTEX_SYNC===\\\\nPROJECT_ID: '+p+'\\\\nCOOKIE: '+c;var d=document.createElement('div');d.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);width:90%;max-width:450px;background:#fff;color:#333;border:2px solid #6366f1;border-radius:12px;padding:15px;box-shadow:0 10px 25px rgba(0,0,0,0.2);z-index:999999;font-family:system-ui,-apple-system,sans-serif;box-sizing:border-box;';var h=document.createElement('h3');h.innerText='🔑 Vertex2OpenAI 一键同步凭证';h.style.cssText='margin:0 0 8px 0;font-size:16px;color:#4f46e5;text-align:center;font-weight:bold;';d.appendChild(h);var p2=document.createElement('p');p2.innerText='已读取 Cookie 与 Project ID。请点击下方按钮复制，然后回到控制大盘的 Cookie 框粘贴即可自动识别！';p2.style.cssText='font-size:12px;margin:0 0 12px 0;color:#555;line-height:1.4;';d.appendChild(p2);var b=document.createElement('button');b.innerText='📋 点击复制同步凭证';b.style.cssText='width:100%;padding:10px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:bold;cursor:pointer;outline:none;';b.onclick=function(){navigator.clipboard.writeText(t).then(function(){b.innerText='✅ 复制成功！请回大盘粘贴';b.style.background='#10b981';}).catch(function(){b.innerText='❌ 复制失败，请手动选择下方文本复制';b.style.background='#ef4444';});};d.appendChild(b);var a=document.createElement('textarea');a.value=t;a.style.cssText='width:100%;height:80px;margin-top:10px;font-size:10px;padding:5px;border-radius:4px;border:1px solid #ddd;font-family:monospace;box-sizing:border-box;';a.readOnly=true;a.onclick=function(){a.select();};d.appendChild(a);var c2=document.createElement('button');c2.innerText='关闭窗口';c2.style.cssText='width:100%;margin-top:8px;padding:6px;background:#f3f4f6;color:#4b5563;border:none;border-radius:6px;font-size:12px;cursor:pointer;';c2.onclick=function(){document.body.removeChild(d);};d.appendChild(c2);document.body.appendChild(d);})();`;
             const el = document.getElementById('bookmarklet-code');
             if(el) el.value = code;
         }
