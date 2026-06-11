@@ -1,365 +1,574 @@
 """
-无头浏览器 / Cookie 直连 代理上游通道
+batchGraphql 直连代理上游通道
 
-支持两种模式：
-1. Cookie 直连模式（推荐）：从环境变量或大盘粘贴的 Cookie 中计算 SAPISIDHASH，直接调用 API
-2. 凭证捕获模式：从无头浏览器截获的凭证中复用请求
+基于 Agent Platform Studio Express Mode 的 batchGraphql 协议实现。
+无需无头浏览器，直接通过 Cookie + SAPISIDHASH 鉴权调用 batchGraphql 端点。
 
-两种模式对调用方完全透明，自动选择可用的认证方式。
+请求格式：
+  POST cloudconsole-pa.clients6.google.com/.../batchGraphql?key=...
+  Body: { requestContext, querySignature, operationName, variables }
+
+响应格式：
+  流式返回多个 JSON 对象，每个包含 results[].data.candidates[].content.parts
 """
 
-import copy
 import json
 import time
+import uuid
 import httpx
 import traceback
-from typing import Any
+from typing import Any, Optional, List, Dict, AsyncGenerator
 from fastapi import Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel
 
 from models import OpenAIRequest
 from upstreams.base import BaseUpstream
 from runtime_state import app_state
 import config as app_config
 
-# Cookie 直连认证
-from cookie_auth import build_auth_headers, build_vertex_url, extract_sapisid
-
-# 引入 google-genai 类型库和 OpenAI 格式转换器
-from google.genai import types
-from api_helpers import convert_chunk_to_openai
-from message_processing import create_gemini_prompt
-
-# 引入流式追踪与消抖处理器 (用于兼容 GraphQL 旧接口)
-from stream_engine.processor import StreamProcessor
+from cookie_auth import (
+    build_headers,
+    BATCH_GRAPHQL_URL,
+    STREAM_GENERATE_QUERY_SIGNATURE,
+    STREAM_GENERATE_OPERATION_NAME,
+)
 
 
-# ========== 载荷构建工具函数 ==========
+# ========== requestContext 模板 ==========
 
-def _serialize_pydantic(obj: Any) -> Any:
-    """将 Pydantic 模型递归序列化为 dict"""
-    if isinstance(obj, BaseModel):
-        return obj.model_dump(mode="json")
-    elif isinstance(obj, dict):
-        return {k: _serialize_pydantic(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_serialize_pydantic(x) for x in obj]
-    return obj
-
-
-_KEY_MAP = {
-    "max_output_tokens": "maxOutputTokens",
-    "stop_sequences": "stopSequences",
-    "top_p": "topP",
-    "top_k": "topK",
-    "candidate_count": "candidateCount",
-    "presence_penalty": "presencePenalty",
-    "frequency_penalty": "frequencyPenalty",
-    "response_mime_type": "responseMimeType",
-    "thinking_config": "thinkingConfig",
-    "include_thoughts": "includeThoughts",
-    "thinking_budget": "thinkingBudget",
-    "thinking_level": "thinkingLevel",
-    "image_config": "imageConfig",
-    "image_size": "imageSize",
-    "aspect_ratio": "aspectRatio",
-    "safety_settings": "safetySettings",
-    "system_instruction": "systemInstruction",
-    "inline_data": "inlineData",
-    "mime_type": "mimeType",
-    "function_call": "functionCall",
-    "function_response": "functionResponse"
-}
-
-
-def _convert_keys_to_camel(obj: Any) -> Any:
-    """snake_case 键名转 camelCase"""
-    if isinstance(obj, dict):
-        return {_KEY_MAP.get(k, k): _convert_keys_to_camel(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_convert_keys_to_camel(x) for x in obj]
-    return obj
-
-
-def _build_fresh_payload(model_name: str, request: OpenAIRequest) -> dict:
+def _build_request_context(project_id: str) -> dict:
     """
-    从零构建 API 请求载荷（Cookie 直连模式专用）
-    不依赖任何捕获的请求体模板
+    构建 batchGraphql 的 requestContext
+
+    保持与 Studio 页面发出的请求格式一致。
     """
-    raw_contents = create_gemini_prompt(request.messages)
-    camel_contents = _convert_keys_to_camel(_serialize_pydantic(raw_contents))
+    return {
+        "clientVersion": "boq_cloud-boq-clientweb-vertexaistudio_20260609.06_p0",
+        "pagePath": "/agent-platform/studio/multimodal",
+        "pageViewId": int(time.time() * 1000) % (10**15),
+        "trackingId": str(int(time.time() * 1000000) % (10**17)),
+        "backendOverrides": {},
+        "clientSessionId": str(uuid.uuid4()).upper(),
+        "projectId": project_id,
+        "selectedPurview": {"projectId": project_id},
+        "jurisdiction": "global",
+        "localizationData": {"locale": "zh_CN", "timezone": "Asia/Hong_Kong"}
+    }
 
-    system_texts = [m.content for m in request.messages if m.role == "system" and isinstance(m.content, str)]
 
-    payload = {"contents": camel_contents}
+# ========== OpenAI → batchGraphql 消息格式转换 ==========
 
+def _convert_messages_to_contents(messages: list) -> tuple:
+    """
+    将 OpenAI messages 转换为 Vertex AI contents 格式
+    
+    Returns:
+        (contents_list, system_instruction_text_or_None)
+    """
+    contents = []
+    system_parts = []
+    
+    for msg in messages:
+        role = msg.role
+        content = msg.content
+        
+        if role == "system":
+            if isinstance(content, str):
+                system_parts.append(content)
+            continue
+        
+        # OpenAI role → Gemini role
+        gemini_role = "user" if role == "user" else "model"
+        
+        parts = []
+        if isinstance(content, str):
+            parts.append({"text": content})
+        elif isinstance(content, list):
+            # 多模态消息 - 内容可能是 Pydantic 模型或 dict
+            for item in content:
+                # 如果是 Pydantic BaseModel，转成 dict
+                if hasattr(item, 'model_dump'):
+                    item = item.model_dump()
+                
+                if isinstance(item, dict):
+                    item_type = item.get("type", "")
+                    if item_type == "text":
+                        parts.append({"text": item.get("text", "")})
+                    elif item_type == "image_url":
+                        url = item.get("image_url", {})
+                        if isinstance(url, dict):
+                            url = url.get("url", "")
+                        if url.startswith("data:"):
+                            try:
+                                header, encoded = url.split(",", 1)
+                                mime_type = header.split(":")[1].split(";")[0]
+                                parts.append({
+                                    "inlineData": {"mimeType": mime_type, "data": encoded}
+                                })
+                            except Exception:
+                                parts.append({"text": "[图片解析失败]"})
+                elif isinstance(item, str):
+                    parts.append({"text": item})
+        
+        if parts:
+            contents.append({"role": gemini_role, "parts": parts})
+    
+    system_text = "\n".join(system_parts) if system_parts else None
+    return contents, system_text
+
+
+def _build_batch_graphql_body(
+    project_id: str,
+    model_name: str,
+    request: OpenAIRequest,
+) -> dict:
+    """
+    构建完整的 batchGraphql 请求体
+    """
+    contents, system_text = _convert_messages_to_contents(request.messages)
+    
+    # 模型完整路径
+    model_path = f"projects/{project_id}/locations/global/publishers/google/models/{model_name}"
+    
     # 生成配置
-    gc = {}
-    if request.temperature is not None: gc["temperature"] = request.temperature
-    if request.max_tokens is not None: gc["maxOutputTokens"] = request.max_tokens
-    if request.top_p is not None: gc["topP"] = request.top_p
-    if request.stop is not None: gc["stopSequences"] = request.stop
-
+    gen_config = {
+        "temperature": request.temperature if request.temperature is not None else 1,
+        "topP": request.top_p if request.top_p is not None else 0.95,
+        "maxOutputTokens": request.max_tokens if request.max_tokens is not None else 65535,
+    }
+    
     # 思考模式
-    if "gemini-3" in model_name or "gemini-2.5" in model_name:
-        gc["thinkingConfig"] = {"includeThoughts": True, "thinkingLevel": "MEDIUM"}
-
-    if gc:
-        payload["generationConfig"] = gc
-
+    if any(kw in model_name for kw in ("gemini-3", "gemini-2.5")):
+        gen_config["thinkingConfig"] = {
+            "thinkingLevel": "MEDIUM",
+            "includeThoughts": True
+        }
+    
+    # 安全设置 - 全部关闭
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+    ]
+    
+    # variables
+    variables = {
+        "contents": contents,
+        "model": model_path,
+        "generationConfig": gen_config,
+        "safetySettings": safety_settings,
+    }
+    
     # 系统提示
-    if system_texts:
-        payload["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
+    if system_text:
+        variables["systemInstruction"] = {"parts": [{"text": system_text}]}
+    
+    # stop sequences
+    if request.stop:
+        gen_config["stopSequences"] = request.stop if isinstance(request.stop, list) else [request.stop]
+    
+    # 搜索工具
+    if hasattr(request, 'model') and request.model.endswith("-search"):
+        variables["tools"] = [{"googleSearch": {}}]
+    
+    body = {
+        "requestContext": _build_request_context(project_id),
+        "querySignature": STREAM_GENERATE_QUERY_SIGNATURE,
+        "operationName": STREAM_GENERATE_OPERATION_NAME,
+        "variables": variables,
+    }
+    
+    return body
 
-    return payload
 
+# ========== batchGraphql 流式响应解析 ==========
 
-def _build_payload_from_template(model_name: str, request: OpenAIRequest, template_body: dict) -> dict:
+async def _iter_json_objects(response) -> AsyncGenerator[dict, None]:
     """
-    基于捕获的请求体模板构建载荷（浏览器捕获模式）
+    从 batchGraphql 流式响应中逐个提取完整 JSON 对象
+    
+    响应是连续的 JSON 对象流（非 JSON Array），需要手动切分。
     """
-    payload = copy.deepcopy(template_body)
-
-    raw_contents = create_gemini_prompt(request.messages)
-    camel_contents = _convert_keys_to_camel(_serialize_pydantic(raw_contents))
-    system_texts = [m.content for m in request.messages if m.role == "system" and isinstance(m.content, str)]
-
-    # 模式 A：旧版 batchGraphql 格式 (含有 variables 节点)
-    if "variables" in payload:
-        variables = payload["variables"]
-        variables["contents"] = camel_contents
-
-        harvested_model = variables.get("model", "")
-        if harvested_model and "/" in harvested_model:
-            parts = harvested_model.split("/")
-            parts[-1] = model_name
-            variables["model"] = "/".join(parts)
-        else:
-            variables["model"] = model_name
-
-        if "generationConfig" not in variables:
-            variables["generationConfig"] = {}
-        gc = variables["generationConfig"]
-        if request.temperature is not None: gc["temperature"] = request.temperature
-        if request.max_tokens is not None: gc["maxOutputTokens"] = request.max_tokens
-        if request.top_p is not None: gc["topP"] = request.top_p
-        if request.stop is not None: gc["stopSequences"] = request.stop
-        if "gemini-3" in model_name or "gemini-2.5" in model_name:
-            gc["thinkingConfig"] = {"includeThoughts": True, "thinkingLevel": "MEDIUM"}
-        else:
-            gc.pop("thinkingConfig", None)
-        if system_texts:
-            variables["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
-
-    # 模式 B：标准 REST streamGenerateContent 格式
-    else:
-        payload["contents"] = camel_contents
-        if "generationConfig" not in payload:
-            payload["generationConfig"] = {}
-        gc = payload["generationConfig"]
-        if request.temperature is not None: gc["temperature"] = request.temperature
-        if request.max_tokens is not None: gc["maxOutputTokens"] = request.max_tokens
-        if request.top_p is not None: gc["topP"] = request.top_p
-        if request.stop is not None: gc["stopSequences"] = request.stop
-        if "gemini-3" in model_name or "gemini-2.5" in model_name:
-            gc["thinkingConfig"] = {"includeThoughts": True, "thinkingLevel": "MEDIUM"}
-        else:
-            gc.pop("thinkingConfig", None)
-        if system_texts:
-            payload["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
-
-    return payload
+    buffer = ""
+    async for chunk in response.aiter_text():
+        if not chunk:
+            continue
+        buffer += chunk
+        
+        while True:
+            start = buffer.find('{')
+            if start == -1:
+                buffer = ""
+                break
+            
+            brace_count = 0
+            in_string = False
+            escape = False
+            end = -1
+            
+            for i in range(start, len(buffer)):
+                c = buffer[i]
+                if escape:
+                    escape = False
+                    continue
+                if c == '\\':
+                    escape = True
+                    continue
+                if c == '"':
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if c == '{':
+                        brace_count += 1
+                    elif c == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end = i
+                            break
+            
+            if end == -1:
+                buffer = buffer[start:]
+                break
+            
+            json_str = buffer[start:end + 1]
+            buffer = buffer[end + 1:]
+            
+            try:
+                yield json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
 
 
-# ========== 认证方式解析 ==========
+def _extract_from_results(obj: dict):
+    """
+    从 batchGraphql 响应对象中提取文本/图片/错误
+    
+    Yields: (event_type, data)
+      event_type: "text" | "thought" | "image" | "finish" | "error"
+      data: str (text/thought/image) 或 dict (error)
+    """
+    # 检查顶层错误
+    if "error" in obj:
+        yield ("error", obj["error"])
+        return
+    
+    results = obj.get("results", [])
+    for result in results:
+        # 检查结果级错误
+        if "errors" in result:
+            for err in result["errors"]:
+                yield ("error", err)
+            continue
+        
+        data = result.get("data")
+        if not data:
+            continue
+        
+        candidates = data.get("candidates", [])
+        for candidate in candidates:
+            content_obj = candidate.get("content") or {}
+            parts = content_obj.get("parts") or []
+            
+            for part in parts:
+                text = part.get("text", "")
+                if text:
+                    if part.get("thought", False):
+                        yield ("thought", text)
+                    else:
+                        yield ("text", text)
+                
+                inline_data = part.get("inlineData")
+                if inline_data:
+                    mime_type = inline_data.get("mimeType", "")
+                    b64 = inline_data.get("data", "")
+                    if mime_type and b64:
+                        image_md = f"![Generated Image](data:{mime_type};base64,{b64})"
+                        yield ("image", image_md)
+            
+            finish_reason = candidate.get("finishReason")
+            if finish_reason and finish_reason in ("STOP", "MAX_TOKENS", "SAFETY"):
+                yield ("finish", finish_reason)
+
+
+# ========== OpenAI SSE 格式化 ==========
+
+def _make_openai_chunk(
+    response_id: str,
+    model: str,
+    content: str = None,
+    reasoning_content: str = None,
+    finish_reason: str = None,
+    role: str = None,
+) -> str:
+    """构建单个 OpenAI SSE chunk"""
+    delta = {}
+    if role:
+        delta["role"] = role
+    if content is not None:
+        delta["content"] = content
+    if reasoning_content is not None:
+        delta["reasoning_content"] = reasoning_content
+    
+    chunk = {
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason,
+        }]
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+
+# ========== 认证解析 ==========
 
 def _get_cookie_string() -> str:
-    """获取当前可用的 Cookie 字符串（环境变量 > 大盘粘贴 > 空）"""
+    """获取可用的 Cookie 字符串"""
     return app_config.GOOGLE_COOKIE or app_state.get_google_cookie() or ""
 
 
-def _resolve_auth():
-    """
-    解析当前可用的认证方式
-    
-    Returns:
-        (mode, headers, url_or_none)
-        mode: "cookie_direct" | "captured" | None
-    """
-    cookie_str = _get_cookie_string()
+def _get_project_id() -> str:
+    """获取可用的 Project ID"""
+    return app_config.GOOGLE_PROJECT_ID or app_state.get_project_id() or ""
 
-    # 优先：Cookie 直连模式
-    if cookie_str and extract_sapisid(cookie_str):
-        headers = build_auth_headers(cookie_str)
-        if headers:
-            return "cookie_direct", headers, None
 
-    # 其次：浏览器捕获的凭证
-    auth_bundle = app_state.get_auth_bundle()
-    if auth_bundle and auth_bundle.get("headers"):
-        raw_headers = {k.lower(): str(v) for k, v in auth_bundle["headers"].items()}
-        raw_headers.pop("accept-encoding", None)
-        raw_headers.pop("content-length", None)
-        raw_headers.pop("host", None)
-        raw_headers.pop("connection", None)
-        raw_headers["content-type"] = "application/json"
-        raw_headers["referer"] = "https://console.cloud.google.com/"
-        raw_headers["origin"] = "https://console.cloud.google.com"
-        return "captured", raw_headers, auth_bundle.get("url")
-
-    return None, None, None
-
+# ========== 主代理类 ==========
 
 class HeadlessProxyUpstream(BaseUpstream):
     """
-    代理通道 - 支持 Cookie 直连 和 浏览器凭证捕获 双模式
+    batchGraphql 直连代理
+    
+    使用 Cookie + SAPISIDHASH 鉴权，
+    通过 batchGraphql 端点调用 Agent Platform Studio Express Mode 模型。
     """
+    
     async def chat_completions(self, request_obj: OpenAIRequest, fastapi_request: Request):
-        mode, headers, captured_url = _resolve_auth()
-
-        if mode is None:
-            return JSONResponse(
-                status_code=401,
-                content={"error": {"message": (
-                    "Studio 代理凭证尚未就绪。\n"
-                    "请在 Render 环境变量中设置 GOOGLE_COOKIE 和 GOOGLE_PROJECT_ID，\n"
-                    "或在大盘控制台中粘贴 Cookie。"
-                ), "type": "auth_error"}}
-            )
-
-        base_model_name = request_obj.model
+        # ===== 1. 验证认证 =====
+        cookie_str = _get_cookie_string()
+        if not cookie_str:
+            return JSONResponse(status_code=401, content={"error": {"message": (
+                "未配置 Google Cookie。\n"
+                "请在大盘控制台中粘贴 Cookie 和 Project ID，\n"
+                "或设置环境变量 GOOGLE_COOKIE 和 GOOGLE_PROJECT_ID。"
+            ), "type": "auth_error"}})
+        
+        project_id = _get_project_id()
+        if not project_id:
+            return JSONResponse(status_code=400, content={"error": {"message": (
+                "未配置 Google Cloud Project ID。\n"
+                "请在大盘中填写，或设置环境变量 GOOGLE_PROJECT_ID。\n"
+                "可从 Studio URL 中获取：...?project=YOUR_PROJECT_ID"
+            ), "type": "config_error"}})
+        
+        # ===== 2. 构建请求头（每次重新计算 SAPISIDHASH） =====
+        headers = build_headers(cookie_str)
+        if not headers:
+            return JSONResponse(status_code=401, content={"error": {"message": (
+                "Cookie 中未找到 SAPISID，无法计算认证头。\n"
+                "请确保 Cookie 来自已登录的 console.cloud.google.com 页面。"
+            ), "type": "auth_error"}})
+        
+        # ===== 3. 解析模型名 =====
+        model_display = request_obj.model
+        base_model_name = model_display
         if base_model_name.endswith("-search"):
             base_model_name = base_model_name[:-len("-search")]
-
-        # 确定 URL 和 Payload
-        if mode == "cookie_direct":
-            project_id = app_config.GOOGLE_PROJECT_ID or app_state.get_project_id()
-            region = app_config.GOOGLE_REGION
-
-            if not project_id:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": {"message": (
-                        "Cookie 直连模式需要配置 GOOGLE_PROJECT_ID。\n"
-                        "请在 Render 环境变量中设置，或在大盘中填写。\n"
-                        "可从 Google Cloud Console URL 中获取：console.cloud.google.com/vertex-ai?project=YOUR_PROJECT_ID"
-                    ), "type": "config_error"}}
-                )
-
-            url = build_vertex_url(project_id, region, base_model_name, stream=request_obj.stream)
-            payload = _build_fresh_payload(base_model_name, request_obj)
-        else:
-            # 捕获模式
-            url = captured_url
-            auth_bundle = app_state.get_auth_bundle()
-            payload = _build_payload_from_template(base_model_name, request_obj, auth_bundle.get("body", {}))
-
-        # 客户端网络配置
-        client_kwargs = {"timeout": 120.0, "follow_redirects": True}
+        
+        # ===== 4. 构建 batchGraphql 请求体 =====
+        body = _build_batch_graphql_body(project_id, base_model_name, request_obj)
+        
+        # ===== 5. HTTP 客户端配置 =====
+        client_kwargs = {
+            "timeout": httpx.Timeout(connect=30.0, read=180.0, write=30.0, pool=10.0),
+            "follow_redirects": True,
+            "http1": True,
+            "http2": True,
+        }
         if app_config.PROXY_URL:
             client_kwargs["proxy"] = app_config.PROXY_URL
-        if app_config.SSL_CERT_FILE:
-            client_kwargs["verify"] = app_config.SSL_CERT_FILE
-
+        
         is_stream = request_obj.stream
-
+        response_id = f"chatcmpl-studio-{int(time.time())}"
+        
         # ========== 流式处理 ==========
         if is_stream:
             async def stream_generator():
-                response_id = f"chatcmpl-studio-{int(time.time())}"
-
+                role_sent = False
+                has_content = False
+                
                 try:
-                    # Cookie 直连模式每次请求重新计算 SAPISIDHASH
-                    req_headers = headers
-                    if mode == "cookie_direct":
-                        req_headers = build_auth_headers(_get_cookie_string()) or headers
-
+                    # 每次请求重新计算 SAPISIDHASH
+                    req_headers = build_headers(_get_cookie_string()) or headers
+                    
                     async with httpx.AsyncClient(**client_kwargs) as client:
-                        async with client.stream("POST", url, headers=req_headers, json=payload) as response:
+                        async with client.stream("POST", BATCH_GRAPHQL_URL,
+                                                  headers=req_headers, json=body) as response:
+                            
                             if response.status_code != 200:
                                 error_text = await response.aread()
-                                error_msg = error_text.decode('utf-8', errors='replace')
-                                yield f"data: {json.dumps({'error': f'Studio Error {response.status_code}: {error_msg[:500]}'})}\\n\\n"
+                                error_msg = error_text.decode('utf-8', errors='replace')[:1000]
+                                print(f"❌ [batchGraphql] HTTP {response.status_code}: {error_msg[:200]}")
+                                yield _make_openai_chunk(
+                                    response_id, model_display,
+                                    content=f"[Studio 错误 {response.status_code}] {error_msg[:500]}"
+                                )
+                                yield _make_openai_chunk(
+                                    response_id, model_display, finish_reason="stop"
+                                )
+                                yield "data: [DONE]\n\n"
                                 return
-
-                            buffer = ""
-                            async for chunk in response.aiter_text():
-                                if not chunk:
-                                    continue
-                                buffer += chunk
-
-                                while True:
-                                    start_idx = buffer.find('{')
-                                    if start_idx == -1:
-                                        buffer = ""
-                                        break
-
-                                    brace_count = 0
-                                    in_string = False
-                                    escape = False
-                                    end_idx = -1
-
-                                    for i in range(start_idx, len(buffer)):
-                                        char = buffer[i]
-                                        if escape:
-                                            escape = False
-                                            continue
-                                        if char == '\\\\':
-                                            escape = True
-                                            continue
-                                        if char == '"':
-                                            in_string = not in_string
-                                            continue
-                                        if not in_string:
-                                            if char == '{':
-                                                brace_count += 1
-                                            elif char == '}':
-                                                brace_count -= 1
-                                                if brace_count == 0:
-                                                    end_idx = i
-                                                    break
-
-                                    if end_idx != -1:
-                                        json_str = buffer[start_idx:end_idx + 1]
-                                        buffer = buffer[end_idx + 1:]
-                                        try:
-                                            obj = json.loads(json_str)
-                                            gemini_chunk = types.GenerateContentResponse(**obj)
-                                            yield convert_chunk_to_openai(gemini_chunk, request_obj.model, response_id, 0)
-                                        except Exception:
-                                            pass
-                                    else:
-                                        buffer = buffer[start_idx:]
-                                        break
-
-                            yield "data: [DONE]\\n\\n"
-
+                            
+                            # 发送 role chunk
+                            if not role_sent:
+                                yield _make_openai_chunk(
+                                    response_id, model_display, role="assistant"
+                                )
+                                role_sent = True
+                            
+                            # 逐个解析 JSON 对象并提取内容
+                            async for obj in _iter_json_objects(response):
+                                for event_type, data in _extract_from_results(obj):
+                                    if event_type == "text":
+                                        yield _make_openai_chunk(
+                                            response_id, model_display, content=data
+                                        )
+                                        has_content = True
+                                    
+                                    elif event_type == "thought":
+                                        yield _make_openai_chunk(
+                                            response_id, model_display, reasoning_content=data
+                                        )
+                                        has_content = True
+                                    
+                                    elif event_type == "image":
+                                        yield _make_openai_chunk(
+                                            response_id, model_display, content=data
+                                        )
+                                        has_content = True
+                                    
+                                    elif event_type == "finish":
+                                        fr = "stop" if data == "STOP" else "length" if data == "MAX_TOKENS" else "stop"
+                                        yield _make_openai_chunk(
+                                            response_id, model_display, finish_reason=fr
+                                        )
+                                    
+                                    elif event_type == "error":
+                                        err_msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
+                                        print(f"❌ [batchGraphql] API 错误: {err_msg[:200]}")
+                                        yield _make_openai_chunk(
+                                            response_id, model_display,
+                                            content=f"\n[Studio API 错误] {err_msg}"
+                                        )
+                            
+                            # 如果没有发送 finish chunk，补一个
+                            if has_content:
+                                yield _make_openai_chunk(
+                                    response_id, model_display, finish_reason="stop"
+                                )
+                            elif not has_content:
+                                yield _make_openai_chunk(
+                                    response_id, model_display, content="[无响应内容]"
+                                )
+                                yield _make_openai_chunk(
+                                    response_id, model_display, finish_reason="stop"
+                                )
+                            
+                            yield "data: [DONE]\n\n"
+                
                 except Exception as e:
-                    print(f"❌ [StudioProxy] 流式异常: {e}")
+                    print(f"❌ [batchGraphql] 流式异常: {e}")
                     traceback.print_exc()
-                    yield f"data: {json.dumps({'error': f'Stream error: {str(e)}'})}\\n\\n"
-
+                    if not role_sent:
+                        yield _make_openai_chunk(response_id, model_display, role="assistant")
+                    yield _make_openai_chunk(
+                        response_id, model_display, content=f"\n[代理错误] {str(e)}"
+                    )
+                    yield _make_openai_chunk(response_id, model_display, finish_reason="stop")
+                    yield "data: [DONE]\n\n"
+            
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
-
+        
         # ========== 非流式处理 ==========
         else:
             try:
-                req_headers = headers
-                if mode == "cookie_direct":
-                    req_headers = build_auth_headers(_get_cookie_string()) or headers
-
+                req_headers = build_headers(_get_cookie_string()) or headers
+                
                 async with httpx.AsyncClient(**client_kwargs) as client:
-                    response = await client.post(url, headers=req_headers, json=payload)
+                    response = await client.post(
+                        BATCH_GRAPHQL_URL, headers=req_headers, json=body
+                    )
+                    
                     if response.status_code != 200:
-                        return JSONResponse(status_code=response.status_code, content={"error": response.text})
-
-                    obj = response.json()
-                    gemini_response = types.GenerateContentResponse(**obj)
-                    from message_processing import convert_to_openai_format
-                    openai_response = convert_to_openai_format(gemini_response, request_obj.model)
-                    return JSONResponse(content=openai_response)
+                        return JSONResponse(status_code=response.status_code, content={
+                            "error": {"message": response.text[:500], "type": "upstream_error"}
+                        })
+                    
+                    # 解析所有 JSON 对象，收集文本
+                    full_text = ""
+                    reasoning_text = ""
+                    finish_reason = "stop"
+                    
+                    raw_text = response.text
+                    # 简单提取所有 JSON 对象
+                    import io
+                    
+                    class _FakeResponse:
+                        """模拟异步迭代器供 _iter_json_objects 使用"""
+                        def __init__(self, text):
+                            self._text = text
+                            self._done = False
+                        
+                        async def aiter_text(self):
+                            yield self._text
+                    
+                    fake_resp = _FakeResponse(raw_text)
+                    async for obj in _iter_json_objects(fake_resp):
+                        for event_type, data in _extract_from_results(obj):
+                            if event_type == "text":
+                                full_text += data
+                            elif event_type == "thought":
+                                reasoning_text += data
+                            elif event_type == "image":
+                                full_text += data
+                            elif event_type == "finish":
+                                if data == "MAX_TOKENS":
+                                    finish_reason = "length"
+                            elif event_type == "error":
+                                err_msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
+                                full_text += f"\n[错误] {err_msg}"
+                    
+                    if not full_text:
+                        full_text = " "
+                    
+                    # 构建 OpenAI 响应
+                    message_obj = {"role": "assistant", "content": full_text}
+                    if reasoning_text:
+                        message_obj["reasoning_content"] = reasoning_text
+                    
+                    return JSONResponse(content={
+                        "id": response_id,
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": model_display,
+                        "choices": [{
+                            "index": 0,
+                            "message": message_obj,
+                            "finish_reason": finish_reason,
+                        }],
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                        }
+                    })
+            
             except Exception as e:
-                print(f"❌ [StudioProxy] 非流式异常: {e}")
+                print(f"❌ [batchGraphql] 非流式异常: {e}")
                 traceback.print_exc()
-                return JSONResponse(status_code=500, content={"error": f"Studio proxy error: {str(e)}"})
+                return JSONResponse(status_code=500, content={
+                    "error": {"message": f"batchGraphql proxy error: {str(e)}", "type": "proxy_error"}
+                })
