@@ -35,8 +35,8 @@ from cookie_auth import (
 )
 
 # ========== 重试配置 ==========
-MAX_RETRIES = 3
-RETRY_BACKOFF = [2, 4, 8]  # 每次重试等待秒数
+MAX_RETRIES = 10
+RETRY_BACKOFF = [5] * 10  # 每次重试等待秒数
 
 # 可重试的错误关键词（429 限流类）
 RETRYABLE_KEYWORDS = [
