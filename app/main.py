@@ -262,7 +262,25 @@ DASHBOARD_HTML = """
                             <b>获取方法：</b>在电脑浏览器打开 <code>console.cloud.google.com</code> 并登录，<br>
                             按 <b>F12</b> → 切换到 <b>Console</b> 面板 → 输入 <code class="bg-blue-100 px-1 py-0.5 rounded select-all">copy(document.cookie)</code> 回车 → Cookie 已复制到剪贴板！<br>
                             <b>Project ID：</b>从 Studio URL 的 <code>?project=xxx</code> 参数中获取。<br>
-                            ⚠️ <span class="text-amber-600 font-semibold">Cookie 有效期约 1~2 小时</span>（PSIDTS 令牌会过期），过期后重新获取粘贴即可。
+                            ⚠️ <span class="text-amber-600 font-semibold">Cookie 有效期约 1~2 小时</span>（PSIDTS 会过期），过期后重新获取粘贴即可。
+                        </div>
+                        
+                        <div class="mt-3 p-3 bg-purple-50/70 rounded-xl border border-purple-100/70 shadow-sm">
+                            <div class="flex items-center justify-between mb-2">
+                                <label class="text-xs font-bold text-purple-700 flex items-center gap-1">
+                                    📱 手机/桌面通用：一键同步书签 (Bookmarklet)
+                                </label>
+                            </div>
+                            <div class="text-[11px] text-slate-600 mb-2 leading-relaxed">
+                                <b>1. 添加书签：</b>复制下方代码，在浏览器任意页面添加书签，将书签网址(URL)替换为这段代码。<br>
+                                <b>2. 一键同步：</b>在手机打开 <code>console.cloud.google.com</code>（需登录），点开刚刚保存的书签，即可自动获取 Cookie 并同步到大盘！
+                            </div>
+                            <div class="relative">
+                                <textarea id="bookmarklet-code" class="w-full text-[10px] p-2 pr-8 border border-purple-200 rounded text-purple-800 bg-purple-50/50 font-mono break-all focus:outline-none" rows="3" readonly></textarea>
+                                <button onclick="copyBookmarklet()" class="absolute top-2 right-2 text-purple-600 hover:text-purple-800 p-1" title="复制代码">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -529,9 +547,27 @@ DASHBOARD_HTML = """
             if (isAutoScroll) logWindow.scrollTop = logWindow.scrollHeight;
         };
 
-        fetchStats();
-        loadRuntimeSettings();
-        setInterval(fetchStats, 3000);
+        function init() {
+            fetchStats();
+            loadRuntimeSettings();
+            setInterval(fetchStats, 3000);
+            initBookmarklet();
+        }
+
+        function initBookmarklet() {
+            const code = `javascript:(function(){var p=new URLSearchParams(window.location.search).get('project')||(window.location.href.match(/project=([^&]+)/)||[])[1];if(!p)p=prompt("未检测到 Project ID，请手动输入:");if(!p)return;var s=localStorage.getItem('v2o_url')||prompt("首次使用请输入反代接口地址\\n(如 ${window.location.origin}/api/headless/cookie):","${window.location.origin}/api/headless/cookie");if(!s)return;var url=s.endsWith('/api/headless/cookie')?s:s.replace(/\\/$/,'')+'/api/headless/cookie';localStorage.setItem('v2o_url',url);var k=localStorage.getItem('v2o_key')||prompt("请输入大盘的 API_KEY 密码:");if(!k)return;localStorage.setItem('v2o_key',k);fetch(url,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Basic '+btoa('admin:'+k)},body:JSON.stringify({cookie:document.cookie,project_id:p})}).then(r=>{if(r.status===401){localStorage.removeItem('v2o_key');throw new Error('密码错误(401)，请重试');}return r.json();}).then(d=>{if(d.status==='success')alert('✅ 成功同步最新 Cookie 到大盘！\\nProject: '+p);else alert('❌ 同步失败: '+(d.error||JSON.stringify(d)));}).catch(e=>{alert('❌ 发生错误: '+e.message);});})();`;
+            const el = document.getElementById('bookmarklet-code');
+            if(el) el.value = code;
+        }
+
+        function copyBookmarklet() {
+            const el = document.getElementById('bookmarklet-code');
+            el.select();
+            document.execCommand('copy');
+            alert('✅ 书签代码已复制！\\n\\n【手机 Safari 教程】\\n1. 随便把一个网页加入书签\\n2. 点击"编辑"这个书签\\n3. 名称改为"同步Cookie"\\n4. 网址(URL)清空，粘贴刚才复制的代码\\n5. 以后在 console.cloud.google.com 页面，点击书签里的"同步Cookie"即可！');
+        }
+
+        init();
     </script>
 </body>
 </html>
