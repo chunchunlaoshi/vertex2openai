@@ -219,67 +219,45 @@ DASHBOARD_HTML = """
                     
                     <div id="web-proxy-config" class="hidden mt-5 pt-5 border-t border-slate-100 space-y-4">
                         <div class="flex flex-col gap-3">
-                            <div class="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
-                                <div class="flex items-center gap-3">
-                                    <div id="headless-status-indicator" class="w-3 h-3 rounded-full bg-slate-300"></div>
-                                    <div class="flex flex-col">
-                                        <span class="text-xs font-bold text-slate-700">无头浏览器状态</span>
-                                        <span id="headless-status-text" class="text-xs text-slate-500">检测中...</span>
-                                    </div>
-                                </div>
-                                <button onclick="refreshCredentials()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-200 font-semibold text-xs px-4 py-1.5 rounded-lg transition-all shadow-sm">立即触发刷新</button>
-                            </div>
-                            
-                            <div class="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
-                                <div class="flex flex-col">
-                                    <span class="text-xs font-bold text-slate-700">当前会话凭证</span>
-                                    <span id="credential-age-text" class="text-xs text-slate-500">获取中...</span>
-                                </div>
-                                <span class="text-xs text-slate-400 font-medium">系统自动维护会话活性</span>
-                            </div>
-
                             <div id="cookie-direct-config" class="p-3 bg-blue-50/50 rounded-xl border border-blue-200 mt-2 space-y-3">
                                 <div>
                                     <label class="text-xs font-bold text-slate-700 mb-1 flex items-center gap-1">
-                                        🚀 API 直连 Cookie <span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">免浏览器</span>
+                                        🚀 API 直连 Cookie (包含 HttpOnly 字段)
                                     </label>
-                                    <textarea id="google-cookie-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" rows="2" placeholder="在此粘贴从 console.cloud.google.com 获取的完整 Cookie..."></textarea>
+                                    <textarea id="google-cookie-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" rows="3" placeholder="在此粘贴从 console.cloud.google.com 获取的完整 Cookie（支持直接粘贴 Cookie-Editor 导出的 Header String 或 JSON，系统会自动解析）"></textarea>
                                 </div>
                                 <div>
                                     <label class="text-xs font-bold text-slate-700 mb-1 block">
-                                        Google Cloud Project ID
+                                        Google Cloud Project ID (项目 ID)
                                     </label>
-                                    <input type="text" id="google-project-id-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" placeholder="例如: gen-lang-client-xxxx">
+                                    <input type="text" id="google-project-id-input" class="w-full text-xs p-2.5 border border-slate-300 rounded-lg shadow-inner bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-600 font-mono" placeholder="例如: ancient-grammar-xv9qn (可直接粘贴浏览器整条 URL，系统会自动提取 Project ID)">
                                 </div>
                                 <div class="flex justify-between items-center mt-2">
                                     <div class="text-[10px] text-slate-500">保存后自动验证是否包含 SAPISID</div>
-                                    <button onclick="saveGoogleCookie()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-1.5 rounded-lg transition-all shadow-sm">保存直连配置</button>
+                                    <button onclick="saveGoogleCookie()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-1.5 rounded-lg transition-all shadow-sm">保存直连配置并激活</button>
                                 </div>
                             </div>
                         </div>
-                        <div class="text-[11px] text-slate-600 mt-3 p-3 bg-blue-50/70 rounded-xl border border-blue-100/70 leading-relaxed shadow-sm">
-                            💡 <span class="font-bold text-blue-700">Cookie 直连模式（免浏览器/免重启）：</span><br>
-                            <b>获取方法：</b>在电脑浏览器打开 <code>console.cloud.google.com</code> 并登录，<br>
-                            按 <b>F12</b> → 切换到 <b>Console</b> 面板 → 输入 <code class="bg-blue-100 px-1 py-0.5 rounded select-all">copy(document.cookie)</code> 回车 → Cookie 已复制到剪贴板！<br>
-                            <b>手机获取（支持 HttpOnly）：</b>iOS 安装 Safari 插件 <code>Cookie-Editor</code> / 安卓使用 Kiwi 浏览器安装 <code>Cookie-Editor</code> 插件，登录后点击插件选择 Export 导出为 Header String 或 JSON 直接粘贴到此处。<br>
-                            ⚠️ <span class="text-amber-600 font-semibold">Cookie 有效期约 1~2 小时</span>（PSIDTS 会过期），过期后重新获取粘贴即可。
-                        </div>
                         
-                        <div class="mt-3 p-3 bg-purple-50/70 rounded-xl border border-purple-100/70 shadow-sm">
-                            <div class="flex items-center justify-between mb-2">
-                                <label class="text-xs font-bold text-purple-700 flex items-center gap-1">
-                                    📱 手机/桌面通用：一键同步书签 (Bookmarklet)
-                                </label>
+                        <div class="text-[11px] text-slate-600 mt-3 p-4 bg-blue-50/70 rounded-xl border border-blue-100/70 leading-relaxed shadow-sm space-y-2.5">
+                            <div>
+                                💡 <span class="font-bold text-blue-700 text-xs">获取 Cookie 与 Project ID 详细指引（支持手机端与电脑端）：</span>
                             </div>
-                            <div class="text-[11px] text-slate-600 mb-2 leading-relaxed">
-                                <b>1. 添加书签：</b>复制下方代码，在浏览器任意页面添加书签，将书签网址(URL)替换为这段代码。<br>
-                                <b>2. 一键同步：</b>在手机打开 <code>console.cloud.google.com</code>，点击此书签，弹窗中点击按钮复制。然后回到此处，直接在 Cookie 框粘贴即可自动填充 Project ID！
+                            <div class="space-y-1">
+                                <p><b>1. 获取完整 Cookie（包含关键 HttpOnly 字段）：</b></p>
+                                <ul class="list-disc pl-5 space-y-1">
+                                    <li><b>电脑端获取：</b>打开并登录 <code>console.cloud.google.com</code>，按 <b>F12</b> → 切换到 <b>Network</b> 选项卡 → 刷新网页 → 在左侧随便找一个请求点击 → 复制 Request Headers 中的 <code>Cookie</code> 整段字段值粘贴到下方。</li>
+                                    <li><b>手机端获取：</b>iOS 手机在 Safari 浏览器安装免费插件 <code>Cookie-Editor</code>，安卓手机使用 Kiwi 浏览器安装 <code>Cookie-Editor</code> 插件。登录 <code>console.cloud.google.com</code> 后点击插件，选择 <b>Export</b> 并选择 <b>Header String</b> 或 <b>JSON</b> 导出，直接粘贴到此处即可。</li>
+                                </ul>
                             </div>
-                            <div class="relative">
-                                <textarea id="bookmarklet-code" class="w-full text-[10px] p-2 pr-8 border border-purple-200 rounded text-purple-800 bg-purple-50/50 font-mono break-all focus:outline-none" rows="3" readonly></textarea>
-                                <button onclick="copyBookmarklet()" class="absolute top-2 right-2 text-purple-600 hover:text-purple-800 p-1" title="复制代码">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
-                                </button>
+                            <div class="space-y-1">
+                                <p><b>2. 获取 Project ID：</b></p>
+                                <ul class="list-disc pl-5">
+                                    <li>直接复制手机或电脑浏览器地址栏的<b>整条网址 URL</b>（如含有 <code>?project=xxx</code> 的链接），将其粘贴到 Project ID 的输入框中，系统会自动为你识别并提取出干净的项目 ID！</li>
+                                </ul>
+                            </div>
+                            <div class="text-amber-600 font-semibold pt-1 border-t border-blue-100/50">
+                                ⚠️ 注意事项：Cookie 有效期一般为 1~2 小时（PSIDTS 会过期），过期后模型调用会报 Permission Denied 错误，此时只需重新获取并粘贴保存即可。
                             </div>
                         </div>
                     </div>
@@ -395,43 +373,6 @@ DASHBOARD_HTML = """
                 document.getElementById('stat-total-tokens').innerText = formatNumber(data.prompt_tokens + data.completion_tokens);
                 
                 renderChart(data.success, data.error, data.retries);
-                
-                if (document.querySelector('input[name="api_mode"][value="web_proxy"]').checked) {
-                    try {
-                        const statusRes = await fetch('/api/headless/status');
-                        const statusData = await statusRes.json();
-                        
-                        const indicator = document.getElementById('headless-status-indicator');
-                        const statusText = document.getElementById('headless-status-text');
-                        const ageText = document.getElementById('credential-age-text');
-                        
-                        if (statusData.is_running) {
-                            indicator.className = 'w-3 h-3 rounded-full bg-emerald-500';
-                            statusText.innerText = '🟢 正在运行 (兼容模式)';
-                        } else {
-                            indicator.className = 'w-3 h-3 rounded-full bg-slate-400';
-                            statusText.innerText = '⚪ 未启动 (使用 Cookie 直连模式可忽略)';
-                        }
-                        
-                        if (statusData.credential_age !== null && statusData.credential_age < 999999) {
-                            const ageSecs = Math.floor(statusData.credential_age);
-                            if (ageSecs < 60) {
-                                ageText.innerText = `最近更新: ${ageSecs} 秒前`;
-                                ageText.className = 'text-xs text-emerald-600 font-bold';
-                            } else {
-                                ageText.innerText = `最近更新: ${Math.floor(ageSecs / 60)} 分钟前`;
-                                if (ageSecs > 180) {
-                                    ageText.className = 'text-xs text-amber-500 font-bold';
-                                } else {
-                                    ageText.className = 'text-xs text-emerald-600 font-bold';
-                                }
-                            }
-                        } else {
-                            ageText.innerText = '等待获取凭证...';
-                            ageText.className = 'text-xs text-slate-500';
-                        }
-                    } catch (ignore) {}
-                }
             } catch (e) {
                 console.error("Fetch stats failed", e);
             }
@@ -615,25 +556,27 @@ DASHBOARD_HTML = """
             if (isAutoScroll) logWindow.scrollTop = logWindow.scrollHeight;
         };
 
+        function handleProjectIdInput(e) {
+            let val = e.target.value.trim();
+            if (val.includes('project=')) {
+                const match = val.match(/[?&]project=([^&]+)/);
+                if (match && match[1]) {
+                    e.target.value = match[1];
+                }
+            } else if (val.includes('/projects/')) {
+                const match = val.match(/\/projects\/([^/]+)/);
+                if (match && match[1]) {
+                    e.target.value = match[1];
+                }
+            }
+        }
+
         function init() {
             fetchStats();
             loadRuntimeSettings();
             setInterval(fetchStats, 3000);
-            initBookmarklet();
             document.getElementById('google-cookie-input').addEventListener('input', handleCookieInput);
-        }
-
-        function initBookmarklet() {
-            const code = `javascript:(function(){var p=new URLSearchParams(window.location.search).get('project')||(window.location.href.match(/project=([^&]+)/)||[])[1]||'';var c=document.cookie;var t='===VERTEX_SYNC===\\\\nPROJECT_ID: '+p+'\\\\nCOOKIE: '+c;var d=document.createElement('div');d.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);width:90%;max-width:450px;background:#fff;color:#333;border:2px solid #6366f1;border-radius:12px;padding:15px;box-shadow:0 10px 25px rgba(0,0,0,0.2);z-index:999999;font-family:system-ui,-apple-system,sans-serif;box-sizing:border-box;';var h=document.createElement('h3');h.innerText='🔑 Vertex2OpenAI 一键同步凭证';h.style.cssText='margin:0 0 8px 0;font-size:16px;color:#4f46e5;text-align:center;font-weight:bold;';d.appendChild(h);var p2=document.createElement('p');p2.innerText='已读取 Cookie 与 Project ID。请点击下方按钮复制，然后回到控制大盘的 Cookie 框粘贴即可自动识别！';p2.style.cssText='font-size:12px;margin:0 0 12px 0;color:#555;line-height:1.4;';d.appendChild(p2);var b=document.createElement('button');b.innerText='📋 点击复制同步凭证';b.style.cssText='width:100%;padding:10px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:bold;cursor:pointer;outline:none;';b.onclick=function(){navigator.clipboard.writeText(t).then(function(){b.innerText='✅ 复制成功！请回大盘粘贴';b.style.background='#10b981';}).catch(function(){b.innerText='❌ 复制失败，请手动选择下方文本复制';b.style.background='#ef4444';});};d.appendChild(b);var a=document.createElement('textarea');a.value=t;a.style.cssText='width:100%;height:80px;margin-top:10px;font-size:10px;padding:5px;border-radius:4px;border:1px solid #ddd;font-family:monospace;box-sizing:border-box;';a.readOnly=true;a.onclick=function(){a.select();};d.appendChild(a);var c2=document.createElement('button');c2.innerText='关闭窗口';c2.style.cssText='width:100%;margin-top:8px;padding:6px;background:#f3f4f6;color:#4b5563;border:none;border-radius:6px;font-size:12px;cursor:pointer;';c2.onclick=function(){document.body.removeChild(d);};d.appendChild(c2);document.body.appendChild(d);})();`;
-            const el = document.getElementById('bookmarklet-code');
-            if(el) el.value = code;
-        }
-
-        function copyBookmarklet() {
-            const el = document.getElementById('bookmarklet-code');
-            el.select();
-            document.execCommand('copy');
-            alert('✅ 书签代码已复制！\\n\\n【手机 Safari 教程】\\n1. 随便把一个网页加入书签\\n2. 点击"编辑"这个书签\\n3. 名称改为"同步Cookie"\\n4. 网址(URL)清空，粘贴刚才复制的代码\\n5. 以后在 console.cloud.google.com 页面，点击书签里的"同步Cookie"即可！');
+            document.getElementById('google-project-id-input').addEventListener('input', handleProjectIdInput);
         }
 
         init();
