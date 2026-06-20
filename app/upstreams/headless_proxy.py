@@ -3,7 +3,7 @@ batchGraphql 直连代理上游通道
 
 基于 Agent Platform Studio Express Mode 的 batchGraphql 协议实现。
 支持完整的 Function Calling (工具调用) 与 Google Search。
-内置终极防弹 Schema 清洗器，完美解决所有第三方格式兼容报错。
+内置终极防弹 Schema 清洗器，与自动相邻消息合并机制，完美解决所有兼容报错。
 """
 
 import json
@@ -62,7 +62,6 @@ def _is_cookie_expired_error(error_msg: str) -> bool:
 ALLOWED_SCHEMA_FIELDS = {"type", "description", "properties", "required", "items", "enum", "format", "nullable"}
 
 def _clean_and_convert_schema(schema: dict) -> dict:
-    """递归清洗 Schema，防范第三方客户端发送的不规范数据导致 Google gRPC 崩溃"""
     if not isinstance(schema, dict):
         return schema
     
@@ -70,7 +69,7 @@ def _clean_and_convert_schema(schema: dict) -> dict:
     for k, v in schema.items():
         if k not in ALLOWED_SCHEMA_FIELDS:
             continue
-        if v is None:  # 防御 1: 剔除任何 null 值
+        if v is None:
             continue
 
         if k == "type":
@@ -82,7 +81,6 @@ def _clean_and_convert_schema(schema: dict) -> dict:
             if isinstance(v, dict):
                 cleaned_props = {}
                 for pk, pv in v.items():
-                    # 防御 2: 严防 null 键、空字符串键以及 null 属性值
                     if pk and str(pk).strip() and pv is not None:
                         cleaned_props[str(pk)] = _clean_and_convert_schema(pv)
                 if cleaned_props:
@@ -105,7 +103,6 @@ def _clean_and_convert_schema(schema: dict) -> dict:
         else:
             new_schema[k] = v
             
-    # 防御 3: 强制兜底类型补全（Gemini 必须要有 type）
     if "type" not in new_schema:
         if "properties" in new_schema:
             new_schema["type"] = "OBJECT"
@@ -114,7 +111,6 @@ def _clean_and_convert_schema(schema: dict) -> dict:
         else:
             new_schema["type"] = "STRING"
             
-    # 防御 4: 防止 required 引用了不存在的属性导致校验失败
     if "required" in new_schema:
         if "properties" in new_schema:
             valid_reqs = [r for r in new_schema["required"] if r in new_schema["properties"]]
@@ -155,6 +151,7 @@ def _build_request_context(project_id: str) -> dict:
         "experimentFlagsBinary": _get_experiment_flags(),
         "localizationData": {"locale": "zh_CN", "timezone": "Asia/Hong_Kong"}
     }
+
 
 # ========== OpenAI → batchGraphql 消息格式转换 ==========
 def _convert_messages_to_contents(messages: list) -> tuple:
@@ -205,13 +202,15 @@ def _convert_messages_to_contents(messages: list) -> tuple:
                         "args": args_dict
                     }
                 })
+            # 过滤掉空文本
             if content:
                 parts.append({"text": str(content)})
                 
         else:
             gemini_role = "user" if role == "user" else "model"
             if isinstance(content, str):
-                parts.append({"text": content})
+                if content:  # 过滤掉空文本防崩溃
+                    parts.append({"text": content})
             elif isinstance(content, list):
                 for item in content:
                     if hasattr(item, 'model_dump'):
@@ -235,7 +234,11 @@ def _convert_messages_to_contents(messages: list) -> tuple:
                         parts.append({"text": item})
         
         if parts:
-            contents.append({"role": gemini_role, "parts": parts})
+            # 🧩 关键修复：合并相邻的同角色消息 (将并发工具结果、连续用户消息强行合并为一回合)
+            if contents and contents[-1]["role"] == gemini_role:
+                contents[-1]["parts"].extend(parts)
+            else:
+                contents.append({"role": gemini_role, "parts": parts})
     
     system_text = "\n".join(system_parts) if system_parts else None
     return contents, system_text
@@ -628,16 +631,4 @@ class HeadlessProxyUpstream(BaseUpstream):
                 except Exception as e:
                     err_msg = str(e)
                     is_retryable = _is_retryable_error(err_msg) or "timeout" in err_msg.lower()
-                    if is_retryable and attempt < MAX_RETRIES:
-                        wait_sec = RETRY_BACKOFF[attempt]
-                        print(f"⚠️ [Studio] 异常 (尝试 {attempt+1}): {err_msg[:100]}, {wait_sec}s 后重试...")
-                        await asyncio.sleep(wait_sec)
-                        continue
-                    elapsed = time.time() - start_time
-                    print(f"❌ [Studio] {base_model_name} | 异常 | {elapsed:.1f}s: {err_msg[:150]}")
-                    traceback.print_exc()
-                    return JSONResponse(status_code=500, content={"error": {"message": f"batchGraphql proxy error: {err_msg}", "type": "proxy_error"}})
-            
-            elapsed = time.time() - start_time
-            print(f"❌ [Studio] {base_model_name} | 重试 {MAX_RETRIES} 次后仍失败 | {elapsed:.1f}s")
-            return JSONResponse(status_code=429, content={"error": {"message": "请求被限流，已重试多次仍失败。请稍后再试。", "type": "rate_limit_error"}})
+           
