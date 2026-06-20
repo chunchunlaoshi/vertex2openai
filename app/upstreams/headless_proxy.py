@@ -475,7 +475,8 @@ async def _execute_stream_request(client, headers, body, model_display, response
     events = []
     has_content = False
     has_tool_call = False
-    
+
+    print("\n========== 🕵️‍♂️ 发送给谷歌的终极 JSON 载荷 ==========\n", json.dumps(body, indent=2, ensure_ascii=False), "\n======================================================\n")
     try:
         async with client.stream("POST", BATCH_GRAPHQL_URL, headers=headers, json=body) as response:
             if response.status_code != 200:
